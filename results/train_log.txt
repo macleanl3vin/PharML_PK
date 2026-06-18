@@ -1,0 +1,13 @@
+/Users/macleanlevin/Documents/PharmMLPK_MVP/src/models/gnn_ode.py:373: UserWarning: There exist node types ({'protein_target', 'patient'}) whose representations do not get updated during message passing as they do not occur as destination type in any edge type. This may lead to unexpected behavior.
+  return HeteroConv(
+target shape (7, 6, 2) | mean 25874.69 ng/mL | measurement hours [1, 2, 4, 8, 12, 24]
+epoch 001 | loss 1.897725e+00 | parent 1.894003e+00 | metab 3.722050e-03 | lr 2.0e-03
+
+best loss 2.964607e-03
+
+recovered GNN Vmax modulation factors (learned vs true):
+  rxn_cyp_oxidation            f learned=  1.090  true=  1.300
+  rxn_glucuronidation          f learned=  1.090  true=  0.800
+  rxn_sulfation                f learned=  1.090  true=  1.100
+  rxn_gsh_conjugation          f learned=  1.106  true=  0.700
+  rxn_caff_n3_demethylation    f learned=  1.090  true=  1.200
