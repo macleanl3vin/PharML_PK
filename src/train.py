@@ -111,7 +111,7 @@ def main() -> None:
         optimizer.zero_grad()
 
         # ---- Step 3: forward pass + ODE integration ----
-        traj, curves, factors = model(data, time_points)  # traj [T, 9], curves [7, T, 2]
+        traj, curves, factors = model(data, time_points)  # traj [T, 15], curves [7, T, 2]
         pred = curves[:, measure_idx, :]                  # multi-timepoint slice -> [7, M, 2]
 
         # ---- Step 4: progressive loss (scale-normalized) ----

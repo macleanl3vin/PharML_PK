@@ -2,6 +2,61 @@ import torch
 from collections import defaultdict
 from torch_geometric.data import HeteroData
 
+try:
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+    _RDKIT_AVAILABLE = True
+except Exception:  # rdkit is optional; the builder degrades to deterministic zeros
+    _RDKIT_AVAILABLE = False
+
+# 2048-bit Morgan fingerprints encode chemical structure for every chemical
+# entity (parent drugs AND metabolites) so the GNN sees real chemistry instead
+# of random noise.
+MORGAN_N_BITS = 2048
+MORGAN_RADIUS = 2
+
+# Canonical SMILES for parent drugs and metabolites. Drives the deterministic
+# Morgan fingerprints below. If RDKit is unavailable, or a SMILES is missing /
+# unparseable, the builder falls back to a zero vector -- never random noise.
+SMILES = {
+    # parent drugs
+    "acetaminophen": "CC(=O)Nc1ccc(O)cc1",
+    "caffeine": "Cn1cnc2c1c(=O)n(C)c(=O)n2C",
+    # acetaminophen metabolites
+    "NAPQI": "CC(=O)N=C1C=CC(=O)C=C1",
+    "acetaminophen_glucuronide": "CC(=O)Nc1ccc(OC2OC(C(=O)O)C(O)C(O)C2O)cc1",
+    "acetaminophen_sulfate": "CC(=O)Nc1ccc(OS(=O)(=O)O)cc1",
+    "NAPQI_glutathione": "CC(=O)Nc1ccc(O)c(SCC(NC(=O)CCC(N)C(=O)O)C(=O)NCC(=O)O)c1",
+    # caffeine demethylation metabolites
+    "paraxanthine": "Cn1cnc2c1c(=O)[nH]c(=O)n2C",
+    "theobromine": "Cn1cnc2c1c(=O)n(C)c(=O)[nH]2",
+    "theophylline": "Cn1c(=O)c2[nH]cnc2n(C)c1=O",
+}
+
+
+def morgan_fingerprint(
+    name: str, n_bits: int = MORGAN_N_BITS, radius: int = MORGAN_RADIUS
+) -> torch.Tensor:
+    """Deterministic Morgan fingerprint (``[n_bits]`` float) for a chemical entity.
+
+    Uses RDKit + the canonical ``SMILES`` table when both are available. Falls
+    back to a deterministic zero vector (NEVER random) when RDKit is missing or
+    the SMILES is absent/unparseable, keeping the graph fully reproducible.
+    """
+    smiles = SMILES.get(name)
+    if _RDKIT_AVAILABLE and smiles is not None:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is not None:
+            try:
+                # Modern, non-deprecated RDKit fingerprint generator.
+                from rdkit.Chem import rdFingerprintGenerator
+                gen = rdFingerprintGenerator.GetMorganGenerator(radius=radius, fpSize=n_bits)
+                bitvect = gen.GetFingerprint(mol)
+            except Exception:
+                bitvect = AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=n_bits)
+            return torch.tensor(list(bitvect), dtype=torch.float)
+    return torch.zeros(n_bits, dtype=torch.float)
+
 node_types = [
     'patient',
     'administration_event',
@@ -38,6 +93,7 @@ edge_types = [
 
     ('compartment', 'contains', 'enzyme'),
     ('enzyme', 'catalyzes', 'reaction'),
+    ('drug', 'competitively_inhibits', 'enzyme'),
 
     ('drug', 'distributes_to', 'compartment'),
 
@@ -84,8 +140,41 @@ REACTION_NODES = [
     "rxn_gsh_regeneration",
     "rxn_covalent_binding",
     "rxn_caff_n3_demethylation",
+    "rxn_caff_n1_demethylation",
+    "rxn_caff_n7_demethylation",
     "rxn_clearance",
 ]
+
+# Mechanistic class of each reaction node. The GNN gets this as a deterministic
+# one-hot feature so it can learn the differences between enzyme/reaction classes
+# (e.g. an oxidation behaves differently from a glucuronidation).
+REACTION_TYPE = {
+    "apap_absorption": "absorption",
+    "caffeine_absorption": "absorption",
+    "apap_distribution": "distribution",
+    "caffeine_distribution": "distribution",
+    "rxn_cyp_oxidation": "oxidation",
+    "rxn_glucuronidation": "glucuronidation",
+    "rxn_sulfation": "sulfation",
+    "rxn_gsh_conjugation": "gsh_conjugation",
+    "rxn_gsh_regeneration": "gsh_regeneration",
+    "rxn_covalent_binding": "covalent_binding",
+    "rxn_caff_n3_demethylation": "demethylation",
+    "rxn_caff_n1_demethylation": "demethylation",
+    "rxn_caff_n7_demethylation": "demethylation",
+    "rxn_clearance": "clearance",
+}
+# Stable, sorted category vocabulary -> deterministic one-hot column order.
+REACTION_TYPE_VOCAB = sorted(set(REACTION_TYPE.values()))
+
+
+def reaction_one_hot() -> torch.Tensor:
+    """Deterministic one-hot reaction-type matrix ``[R, len(REACTION_TYPE_VOCAB)]``."""
+    vocab_idx = {category: i for i, category in enumerate(REACTION_TYPE_VOCAB)}
+    onehot = torch.zeros(len(REACTION_NODES), len(REACTION_TYPE_VOCAB))
+    for row, name in enumerate(REACTION_NODES):
+        onehot[row, vocab_idx[REACTION_TYPE[name]]] = 1.0
+    return onehot
 
 METABOLITE_NODES = [
     "NAPQI",
@@ -175,6 +264,13 @@ EDGE_FEATURES = {
         "activity_multiplier",
     ],
 
+    # Competitive inhibition constant Ki (μM). A pure/competitive inhibitor adds
+    # C_inhibitor / Ki to the shared Michaelis-Menten denominator of its target
+    # enzyme. Non-inhibitor pairs default to Ki = 1e6 (effectively infinite).
+    ("drug", "competitively_inhibits", "enzyme"): [
+        "Ki",
+    ],
+
     ("drug", "reactant_in", "reaction"): [
         "consumption_rate",
     ],
@@ -201,8 +297,10 @@ EDGE_FEATURES = {
         "current_pool_mass",
     ],
 
+    # First-order renal clearance rate k_clear (hr⁻¹) per terminal metabolite.
+    # The ODE drains the metabolite by k_clear * amount into the urine sink state.
     ("metabolite", "cleared_via", "reaction"): [
-        "clearance_rate",
+        "k_clear",
     ],
 
     ("reaction", "excretes_to", "compartment"): [
@@ -260,6 +358,15 @@ EDGES = {
         ("CYP1A2", "rxn_cyp_oxidation"),
         ("UGT1A1", "rxn_glucuronidation"), ("SULT1A1", "rxn_sulfation"),
         ("GST", "rxn_gsh_conjugation"), ("CYP1A2", "rxn_caff_n3_demethylation"),
+        # CYP1A2 also drives the minor caffeine demethylation routes.
+        ("CYP1A2", "rxn_caff_n1_demethylation"),
+        ("CYP1A2", "rxn_caff_n7_demethylation"),
+    ],
+
+    # Caffeine competitively inhibits CYP1A2 (the classic APAP<->caffeine DDI):
+    # it throttles every CYP1A2 reaction, including APAP oxidation to NAPQI.
+    ("drug", "competitively_inhibits", "enzyme"): [
+        ("caffeine", "CYP1A2"),
     ],
 
     ("drug", "reactant_in", "reaction"): [
@@ -267,6 +374,8 @@ EDGES = {
         ("acetaminophen", "rxn_glucuronidation"),
         ("acetaminophen", "rxn_sulfation"),
         ("caffeine", "rxn_caff_n3_demethylation"),
+        ("caffeine", "rxn_caff_n1_demethylation"),
+        ("caffeine", "rxn_caff_n7_demethylation"),
     ],
     ("metabolite", "reactant_in", "reaction"): [
         ("NAPQI", "rxn_gsh_conjugation"), ("NAPQI", "rxn_covalent_binding"),
@@ -289,10 +398,19 @@ EDGES = {
         ("rxn_glucuronidation", "acetaminophen_glucuronide"),
         ("rxn_sulfation", "acetaminophen_sulfate"),
         ("rxn_caff_n3_demethylation", "paraxanthine"),
+        ("rxn_caff_n1_demethylation", "theobromine"),
+        ("rxn_caff_n7_demethylation", "theophylline"),
         ("rxn_gsh_conjugation", "NAPQI_glutathione"),
     ],
+    # Only TERMINAL metabolites are renally cleared. NAPQI is reactive (consumed
+    # by GSH conjugation + necrosis, not excreted); NAPQI_glutathione mass is
+    # routed to the urine sink inside the ODE via the conjugation product.
     ("metabolite", "cleared_via", "reaction"): [
-        (m, "rxn_clearance") for m in METABOLITE_NODES
+        ("acetaminophen_glucuronide", "rxn_clearance"),
+        ("acetaminophen_sulfate", "rxn_clearance"),
+        ("paraxanthine", "rxn_clearance"),
+        ("theobromine", "rxn_clearance"),
+        ("theophylline", "rxn_clearance"),
     ],
     ("reaction", "excretes_to", "compartment"): [("rxn_clearance", "urine_sink")],
 
@@ -366,7 +484,10 @@ NODE_VALUES = {
         "glutathione": {
             "current_amount_glut": 3000.0,
             "baseline_homeostatic_pool_glut": 3000.0,
-            "synthesis_rate": 0.0,
+            # First-order homeostatic regeneration k_syn (hr⁻¹): the ODE adds
+            # synthesis_rate * (baseline - current) so the pool refills as it is
+            # consumed by NAPQI conjugation.
+            "synthesis_rate": 0.1,
             "depletion_rate": 0.0,
         },
     },
@@ -429,7 +550,22 @@ EDGE_VALUES = {
         ("UGT1A1", "rxn_glucuronidation"):        {"Km": 3500.0, "Ki": 1e6, "Kcat": 5.0},
         ("SULT1A1", "rxn_sulfation"):             {"Km": 250.0,  "Ki": 1e6, "Kcat": 3.3},
         ("GST", "rxn_gsh_conjugation"):           {"Km": 900.0,  "Ki": 1e6, "Kcat": 6.1},
+        # Caffeine demethylation split (CYP1A2). Kcat scaled to the clinical
+        # formation ratio paraxanthine : theobromine : theophylline ~ 84 : 12 : 4.
         ("CYP1A2", "rxn_caff_n3_demethylation"): {"Km": 500.0,  "Ki": 1e6, "Kcat": 2.9},
+        ("CYP1A2", "rxn_caff_n1_demethylation"): {"Km": 500.0,  "Ki": 1e6, "Kcat": 0.41},
+        ("CYP1A2", "rxn_caff_n7_demethylation"): {"Km": 500.0,  "Ki": 1e6, "Kcat": 0.14},
+    },
+    ("drug", "competitively_inhibits", "enzyme"): {
+        ("caffeine", "CYP1A2"): {"Ki": 150.0},  # μM
+    },
+    # Terminal-metabolite renal clearance rates (hr⁻¹) -> urine sink.
+    ("metabolite", "cleared_via", "reaction"): {
+        ("acetaminophen_glucuronide", "rxn_clearance"): {"k_clear": 0.5},
+        ("acetaminophen_sulfate", "rxn_clearance"):     {"k_clear": 0.5},
+        ("paraxanthine", "rxn_clearance"):              {"k_clear": 0.3},
+        ("theobromine", "rxn_clearance"):               {"k_clear": 0.2},
+        ("theophylline", "rxn_clearance"):              {"k_clear": 0.2},
     },
     ("drug", "absorbed_via", "reaction"): {
         ("acetaminophen", "apap_absorption"):    {"absorption_rate_ka": 1.0},
@@ -453,27 +589,49 @@ def _to_float(v, default=FILL):
     if isinstance(v, (int, float)):
         return float(v)
     return default  # strings / datetime / None -> encode later
-def build_node_tensors(node_type, value_table):
-    """Return (x_state, x_static) for a node type, ordered by NODE_NAMES."""
+def _build_x_state(node_type, value_table):
+    """Deterministic dynamic-state features (seeded at t0); zeros when unpopulated."""
     names = NODE_NAMES[node_type]
     state_cols = NODE_FEATURES_STATE.get(node_type, [])
-    static_cols = NODE_FEATURES_STATIC.get(node_type, [])
-    # fallback so data.validate() still passes for unpopulated types
-    if node_type not in value_table:
-        x_state = torch.randn(len(names), max(len(state_cols), 1))
-        x_static = torch.randn(len(names), max(len(static_cols), 1))
-        return x_state, x_static
-    table = value_table[node_type]
-    state_rows, static_rows = [], []
-    for name in names:
-        rec = table.get(name, {})
-        state_rows.append([_to_float(rec.get(c, FILL)) for c in state_cols])
-        static_rows.append([_to_float(rec.get(c, FILL)) for c in static_cols])
     if len(state_cols) == 0:
-        x_state = torch.zeros(len(names), 0)
+        return torch.zeros(len(names), 0)
+    table = value_table.get(node_type, {})
+    rows = [[_to_float(table.get(name, {}).get(c, FILL)) for c in state_cols] for name in names]
+    return torch.tensor(rows, dtype=torch.float).reshape(len(names), len(state_cols))
+
+
+def build_node_tensors(node_type, value_table):
+    """Return (x_state, x_static) for a node type, ordered by NODE_NAMES.
+
+    No randomness anywhere in the graph: metabolites carry deterministic 2048-bit
+    Morgan fingerprints, reactions carry a one-hot reaction-type vector, and every
+    other static feature is read from the value table or zero-filled. Random noise
+    would destroy the gradient signal, so it is never used.
+    """
+    names = NODE_NAMES[node_type]
+    static_cols = NODE_FEATURES_STATIC.get(node_type, [])
+
+    x_state = _build_x_state(node_type, value_table)
+
+    if node_type == "metabolite":
+        # Treat metabolites exactly like parent drugs: real chemistry via Morgan FP.
+        x_static = torch.stack([morgan_fingerprint(name) for name in names])
+    elif node_type == "reaction":
+        x_static = reaction_one_hot()
+    elif node_type in value_table and len(static_cols) > 0:
+        table = value_table[node_type]
+        rows = [[_to_float(table.get(name, {}).get(c, FILL)) for c in static_cols] for name in names]
+        x_static = torch.tensor(rows, dtype=torch.float).reshape(len(names), len(static_cols))
     else:
-        x_state = torch.tensor(state_rows, dtype=torch.float).reshape(len(names), len(state_cols))
-    x_static = torch.tensor(static_rows, dtype=torch.float).reshape(len(names), len(static_cols))
+        # Unpopulated structural nodes (administration_event, protein_target,
+        # clinical_outcome): deterministic zeros, never randn. Keep >=1 column so
+        # the lazy encoder always receives a feature dimension.
+        x_static = torch.zeros(len(names), max(len(static_cols), 1))
+
+    # Guarantee the encoder input (concat of state + static) is never empty.
+    if x_state.size(1) == 0 and x_static.size(1) == 0:
+        x_static = torch.zeros(len(names), 1)
+
     return x_state, x_static
 def build_target_tensor(node_type):
     """Placeholder y. Will become a [N, T] / [N, T, k] time-series later."""
@@ -482,12 +640,12 @@ def build_target_tensor(node_type):
         return None
     return torch.zeros(len(NODE_NAMES[node_type]), len(cols))  # -> [N, T] in Phase 5
 def build_edge_attr(edge_type, pairs, value_table):
-    """Map kinetic constants onto edges; randn fallback if not yet populated."""
+    """Map kinetic constants onto edges; deterministic zero fallback if unpopulated."""
     cols = EDGE_FEATURES.get(edge_type)
     if not cols:
         return None
     if edge_type not in value_table:
-        return torch.randn(len(pairs), len(cols))
+        return torch.zeros(len(pairs), len(cols))
     table = value_table[edge_type]
     rows = [[_to_float(table.get((s, d), {}).get(c, FILL)) for c in cols] for s, d in pairs]
     return torch.tensor(rows, dtype=torch.float).reshape(len(pairs), len(cols))

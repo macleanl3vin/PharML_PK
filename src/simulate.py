@@ -23,7 +23,7 @@ def run_simulation(
 ) -> tuple[torch.Tensor, torch.Tensor, HeteroData]:
     """Integrate the dummy-graph PK ODE and return (t, traj, data).
 
-    traj shape [T, 9] in mg; t in hours.
+    traj shape [T, 15] in mg; t in hours.
 
     When ``use_gnn_factors`` is True the trained weights are loaded from
     ``checkpoint`` (saved by train.py) before predicting f_GNN. Running on
