@@ -1,12 +1,4 @@
-"""Inspect saved GNN-ODE weights (results/best_model.pt).
-
-Prints parameter names, shapes, and optional full tensor values.
-
-Run from project root:
-    python scripts/inspect_checkpoint.py
-    python scripts/inspect_checkpoint.py --tensor param_head.weight
-    python scripts/inspect_checkpoint.py --values
-"""
+"""Inspect ``results/best_model.pt`` parameter names and shapes."""
 
 from __future__ import annotations
 

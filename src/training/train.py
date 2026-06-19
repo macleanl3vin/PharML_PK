@@ -14,7 +14,7 @@ def train_epoch(
     criterion: nn.Module,
     device: torch.device,
 ) -> float:
-    """Single dummy epoch on synthetic data (replace with real loaders)."""
+    """Placeholder epoch on synthetic tensors."""
     model.train()
     x = torch.randn(32, model.layers[0].in_features, device=device)
     target = torch.randn(32, model.layers[-1].out_features, device=device)

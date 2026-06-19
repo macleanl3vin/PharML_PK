@@ -18,12 +18,7 @@ class TrainingConfig:
 
 
 def get_device(device: str = "auto") -> torch.device:
-    """
-    Resolve torch device from a string.
-
-    Args:
-        device: 'auto', 'cpu', 'cuda', or 'mps' (Apple Silicon).
-    """
+    """Resolve ``cpu`` / ``cuda`` / ``mps`` from string; ``auto`` picks best available."""
     if device == "auto":
         if torch.cuda.is_available():
             return torch.device("cuda")

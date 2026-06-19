@@ -1,9 +1,4 @@
-"""Plot parent-drug amounts (mg) vs time for APAP and caffeine.
-
-Run from project root:
-    python -m src.plot_drug_amounts
-    python -m src.plot_drug_amounts --output results/pk_drug_amounts.png --hours 48
-"""
+"""Plot parent-drug compartment amounts (mg); dashed line is APAP + caffeine sum."""
 
 from __future__ import annotations
 
@@ -25,7 +20,7 @@ def plot_drug_amounts(
     metric: str = "track",
     show: bool = False,
 ) -> None:
-    """Single plot: APAP, caffeine, and APAP + caffeine sum."""
+    """Per-drug amount curves; combined trace sums masses (not concentrations)."""
     hours = t.detach().numpy()
     apap_y = apap[metric].detach().numpy()
     caff_y = caff[metric].detach().numpy()

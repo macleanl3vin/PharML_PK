@@ -1,9 +1,4 @@
-"""Export current graph schema + values to Excel (with units and metadata).
-
-Run from project root:
-    python scripts/export_graph_to_excel.py
-    python scripts/export_graph_to_excel.py --output ~/Downloads/PharmMLPK_Graph_Data.xlsx
-"""
+"""Export graph schema and kinetic values to Excel with unit labels."""
 
 from __future__ import annotations
 
@@ -66,7 +61,7 @@ UNIT_MAPPING = {
     "initial_concentration_ng_mL": "initial_concentration_ng_mL (ng/mL)",
 }
 
-# Scalar node attributes actively wired in the current GNN-ODE pipeline.
+# Fields wired into the current GNN-ODE pipeline vs schema-only placeholders.
 NODE_SOURCE = {
     "patient.weight_kg": "INPUT",
     "drug.molecular_weight": "INPUT",
@@ -145,9 +140,8 @@ def build_nodes_df() -> pd.DataFrame:
                 row[col] = _get(node_type, name, col, "")
 
             for col in target_cols:
-                row[col] = ""  # targets not populated in NODE_VALUES
+                row[col] = ""
 
-            # Extra fields used by the model but not in NODE_FEATURES_* schemas.
             if node_type == "drug":
                 row["target_vd_L_kg"] = _get(node_type, name, "target_vd_L_kg", "")
             if node_type == "reaction":
