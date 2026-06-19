@@ -34,10 +34,16 @@ from torchdiffeq import odeint
 
 from src.data.build_graph import NODE_NAMES, build_dummy_graph
 
-# 9-dim ODE state vector (amounts, e.g. mg).
+# 15-dim ODE state vector (amounts, e.g. mg). Indices 0-12 are kept stable
+# (downstream code in metrics.py / simulate.py keys off STATE_IDX). Two terminal
+# sink states are appended: A_necrosis (covalently bound NAPQI / liver damage)
+# and A_urine_sink (renally excreted mass). Together with the metabolite states
+# they close the mass balance: nothing disappears, it moves into a tracked sink.
 STATE_NAMES = [
     "A_gut_apap", "A_plasma_apap", "A_liver_apap", "A_napqi", "A_gsh",
     "A_gut_caffeine", "A_plasma_caffeine", "A_liver_caffeine", "A_paraxanthine",
+    "A_liver_apap_gluc", "A_liver_apap_sulf", "A_liver_theobromine", "A_liver_theophylline",
+    "A_necrosis", "A_urine_sink",
 ]
 STATE_IDX = {name: i for i, name in enumerate(STATE_NAMES)}
 
@@ -51,10 +57,19 @@ SUBSTRATE_STATE = {
     "caffeine": STATE_IDX["A_liver_caffeine"],
     "NAPQI": STATE_IDX["A_napqi"],
 }
-# Reaction products that have a tracked state (others are not conserved here).
+# Reaction products with a dedicated, mass-conserving ODE state. Every metabolite
+# node in the graph now maps to its own state, so enzymatic flux deposits real
+# mass instead of disappearing. The GSH conjugate (NAPQI_glutathione) is routed
+# straight to the urine sink (mercapturate excretion), closing the NAPQI balance
+# while keeping the endogenous GSH pool as a separate regenerating species.
 PRODUCT_STATE = {
     "NAPQI": STATE_IDX["A_napqi"],
     "paraxanthine": STATE_IDX["A_paraxanthine"],
+    "acetaminophen_glucuronide": STATE_IDX["A_liver_apap_gluc"],
+    "acetaminophen_sulfate": STATE_IDX["A_liver_apap_sulf"],
+    "theobromine": STATE_IDX["A_liver_theobromine"],
+    "theophylline": STATE_IDX["A_liver_theophylline"],
+    "NAPQI_glutathione": STATE_IDX["A_urine_sink"],
 }
 # Co-substrates consumed 1:1 with the reaction flux (e.g. GSH in conjugation).
 COSUBSTRATE_STATE = {"glutathione": STATE_IDX["A_gsh"]}
@@ -68,6 +83,11 @@ SPECIES_MW = {
     "NAPQI": 149.15,
     "paraxanthine": 180.16,
     "glutathione": 307.32,
+    # Explicit conjugate / demethylation products (now tracked as ODE states).
+    "acetaminophen_glucuronide": 327.29,
+    "acetaminophen_sulfate": 231.22,
+    "theobromine": 180.16,
+    "theophylline": 180.16,
 }
 
 # Kcat is stored per-minute in the graph; the ODE runs in hours.
@@ -175,7 +195,10 @@ def build_ode_index(data: HeteroData) -> dict:
         p = prod_species.get(r)
         if p in PRODUCT_STATE:
             edge_prod_state.append(PRODUCT_STATE[p]); edge_prod_mask.append(True)
-            edge_mw_prod.append(SPECIES_MW[p])
+            # Product MW falls back to the substrate's MW: deposition is
+            # parent-equivalent (mg 1:1), so the product's own MW is not needed
+            # (and some products like NAPQI_glutathione have no tabulated MW).
+            edge_mw_prod.append(SPECIES_MW.get(p, SPECIES_MW[sub_species[r]]))
         else:
             edge_prod_state.append(0); edge_prod_mask.append(False); edge_mw_prod.append(1.0)
         c = cosub_species.get(r)
@@ -221,6 +244,39 @@ def build_ode_index(data: HeteroData) -> dict:
                 dist_k_p2l.append(float(dist_attr[k, 0]))
                 dist_k_l2p.append(float(dist_attr[k, 1]))
 
+    # --- competitive inhibition (DDI): drug competitively_inhibits enzyme ---
+    # The inhibitor's liver concentration adds C_inh/Ki to the SHARED denominator
+    # of its target enzyme, throttling every reaction that enzyme catalyses.
+    inhib_et = ("drug", "competitively_inhibits", "enzyme")
+    inhib_state, inhib_enz_local, inhib_ki, inhib_mw = [], [], [], []
+    if inhib_et in data.edge_types and "edge_attr" in data[inhib_et]:
+        inhib_attr = data[inhib_et].edge_attr
+        for k, (d, e) in enumerate(data[inhib_et].edge_index.t().tolist()):
+            name = drug_names[d]
+            if name in SUBSTRATE_STATE and e in enz_group_of:
+                inhib_state.append(SUBSTRATE_STATE[name])     # liver pool drives inhibition
+                inhib_enz_local.append(enz_group_of[e])       # shared per-enzyme denom group
+                inhib_ki.append(max(float(inhib_attr[k, 0]), 1e-6))
+                inhib_mw.append(SPECIES_MW[name])
+
+    # --- dynamic renal clearance: metabolite cleared_via reaction (k_clear) ---
+    # Terminal metabolites drain by k_clear * amount into the urine sink state.
+    clr_et = ("metabolite", "cleared_via", "reaction")
+    clear_state, clear_k = [], []
+    if clr_et in data.edge_types and "edge_attr" in data[clr_et]:
+        clr_attr = data[clr_et].edge_attr
+        for k, (m, _r) in enumerate(data[clr_et].edge_index.t().tolist()):
+            name = met_names[m]
+            if name in PRODUCT_STATE:
+                clear_state.append(PRODUCT_STATE[name])
+                clear_k.append(float(clr_attr[k, 0]))
+
+    # --- GSH homeostatic regeneration params (from the endogenous-pool node) ---
+    # x_static cols = [baseline_homeostatic_pool_glut, synthesis_rate, depletion_rate].
+    endo_static = data["endogenous_molecule"].x_static
+    gsh_baseline_mg = float(endo_static[0, 0].abs())
+    k_syn_gsh = float(endo_static[0, 1].abs())
+
     L = lambda x: torch.tensor(x, dtype=torch.long)
     return {
         "enz_rxn_rows": L(enz_rxn_rows),
@@ -251,6 +307,20 @@ def build_ode_index(data: HeteroData) -> dict:
         "dist_l_idx": L(dist_l_idx),
         "dist_k_p2l": torch.tensor(dist_k_p2l, dtype=torch.float),
         "dist_k_l2p": torch.tensor(dist_k_l2p, dtype=torch.float),
+        # competitive inhibition (DDI) wiring.
+        "inhib_state": L(inhib_state),
+        "inhib_enz_local": L(inhib_enz_local),
+        "inhib_ki": torch.tensor(inhib_ki, dtype=torch.float),
+        "inhib_mw": torch.tensor(inhib_mw, dtype=torch.float),
+        # dynamic renal clearance wiring.
+        "clear_state": L(clear_state),
+        "clear_k": torch.tensor(clear_k, dtype=torch.float),
+        "urine_state": STATE_IDX["A_urine_sink"],
+        "necrosis_state": STATE_IDX["A_napqi"],  # source of the necrosis shunt
+        # GSH homeostatic regeneration.
+        "gsh_state": STATE_IDX["A_gsh"],
+        "gsh_baseline_mg": gsh_baseline_mg,
+        "k_syn_gsh": k_syn_gsh,
     }
 
 
@@ -265,23 +335,28 @@ def trajectory_to_curves(traj: torch.Tensor, v_plasma: torch.Tensor) -> torch.Te
         [7, T, 2] concentrations in ng/mL, aligned with the 7 metabolite nodes;
         column 0 = metabolite concentration, column 1 = parent concentration.
 
-    NOTE: placeholder species mapping (unmodeled metabolites reuse the nearest
-    liver/plasma species). Fully differentiable.
+    Each metabolite row reads its TRUE, dedicated ODE state index (no placeholder
+    species reuse). NAPQI_glutathione has no dedicated state, so it is reported via
+    the GSH-consumed proxy (GSH consumed == GSH-conjugate formed). Fully
+    differentiable.
     """
     c = traj / v_plasma * NG_PER_MG_PER_L  # [T, S] ng/mL
-    gsh_consumed = (traj[0, 4] - traj[:, 4]) / v_plasma * NG_PER_MG_PER_L  # [T]
+    i_gsh = STATE_IDX["A_gsh"]
+    gsh_consumed = (traj[0, i_gsh] - traj[:, i_gsh]) / v_plasma * NG_PER_MG_PER_L  # [T]
     metab = torch.stack([
-        c[:, 3],        # NAPQI
-        c[:, 2],        # acetaminophen_glucuronide (placeholder: liver APAP)
-        c[:, 2],        # acetaminophen_sulfate      (placeholder)
-        gsh_consumed,   # NAPQI_glutathione (detox conjugate proxy)
-        c[:, 8],        # paraxanthine
-        c[:, 7],        # theobromine (placeholder: liver caffeine)
-        c[:, 7],        # theophylline (placeholder)
+        c[:, STATE_IDX["A_napqi"]],               # NAPQI
+        c[:, STATE_IDX["A_liver_apap_gluc"]],     # acetaminophen_glucuronide
+        c[:, STATE_IDX["A_liver_apap_sulf"]],     # acetaminophen_sulfate
+        gsh_consumed,                             # NAPQI_glutathione (GSH-consumed proxy)
+        c[:, STATE_IDX["A_paraxanthine"]],        # paraxanthine
+        c[:, STATE_IDX["A_liver_theobromine"]],   # theobromine
+        c[:, STATE_IDX["A_liver_theophylline"]],  # theophylline
     ], dim=0)           # [7, T]
+    i_apap_p = STATE_IDX["A_plasma_apap"]
+    i_caff_p = STATE_IDX["A_plasma_caffeine"]
     parent = torch.stack([
-        c[:, 1], c[:, 1], c[:, 1], c[:, 1],  # APAP plasma
-        c[:, 6], c[:, 6], c[:, 6],           # caffeine plasma
+        c[:, i_apap_p], c[:, i_apap_p], c[:, i_apap_p], c[:, i_apap_p],  # APAP plasma
+        c[:, i_caff_p], c[:, i_caff_p], c[:, i_caff_p],                  # caffeine plasma
     ], dim=0)           # [7, T]
     # Reported concentrations are non-negative (guards small fixed-step overshoots).
     return torch.stack([metab, parent], dim=-1).clamp(min=0.0)  # [7, T, 2]
@@ -299,20 +374,23 @@ class MichaelisMentenODE(nn.Module):
     where f_GNN is the GNN's positive, dimensionless modulation factor (the GNN
     never predicts raw Vmax). Reactions catalysed by the same enzyme share a
     denominator -> mechanistic DDIs; multi-enzyme reactions sum their edge fluxes.
-    Absorption is first-order with ka read from the absorbed_via edge attribute
-    (input kinetics, not metabolism). Plasma<->liver distribution rates are
-    graph-derived per drug (distributes_to edge: drug Vd target x patient weight);
-    metabolite clearance is a fixed structural constant.
+    Competitive inhibitors (competitively_inhibits edge) add C/Ki to that shared
+    denominator. Absorption is first-order with ka from the absorbed_via edge.
+    Plasma<->liver distribution rates are graph-derived per drug (distributes_to
+    edge: drug Vd target x patient weight). Terminal-metabolite renal clearance is
+    graph-derived (cleared_via edge, k_clear) and drains into A_urine_sink; GSH
+    regenerates toward its baseline; NAPQI shunts to A_necrosis when GSH is low.
+    All transfers are mg 1:1 (parent-equivalent), so total drug mass is conserved.
     """
 
-    def __init__(self, factors: torch.Tensor, idx: dict,
-                 k_clear_napqi: float = 0.4, k_clear_para: float = 0.3):
+    def __init__(self, factors: torch.Tensor, idx: dict, k_tox: float = 0.5):
         super().__init__()
         self.factors = factors                                # [R, 1] GNN Vmax modulation
         self.idx = idx
-        # plasma <-> liver distribution rates now live in idx (graph-derived).
-        self.k_clear_napqi = k_clear_napqi
-        self.k_clear_para = k_clear_para
+        # Renal clearance and plasma<->liver distribution rates are graph-derived
+        # (live in idx); the only remaining hardcoded constant is the first-order
+        # NAPQI -> necrosis (covalent binding) toxicity rate (hr⁻¹).
+        self.k_tox = k_tox
 
     def forward(self, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         idx = self.idx
@@ -336,6 +414,16 @@ class MichaelisMentenODE(nn.Module):
         # shared per-enzyme denominator: 1 + sum(C/Km over the enzyme's edges).
         denom_enz = torch.ones(idx["n_groups"], dtype=y.dtype).index_add(
             0, idx["edge_enz_local"], rho)
+        # --- Component 1: competitive inhibition (DDI) ---
+        # Add sum(C_inhibitor / Ki) to the inhibited enzyme's denominator. The
+        # inhibitor amount (mg) is converted to uM with the liver volume + its MW,
+        # exactly like substrates, so caffeine dynamically chokes CYP1A2 (and thus
+        # APAP oxidation to NAPQI) as its liver level rises.
+        if idx["inhib_state"].numel() > 0:
+            a_inh = y[idx["inhib_state"]].clamp(min=0.0)       # [I] inhibitor amount (mg)
+            c_inh_uM = a_inh / idx["inhib_mw"] / V * UM_PER_MG_PER_L
+            rho_inh = c_inh_uM / idx["inhib_ki"]               # [I] C/Ki
+            denom_enz = denom_enz.index_add(0, idx["inhib_enz_local"], rho_inh)
         denom_edge = denom_enz[idx["edge_enz_local"]]          # [E]
         v_uM_hr = vmax * rho / denom_edge                      # [E] molar flux (uM/hr)
 
@@ -351,12 +439,16 @@ class MichaelisMentenODE(nn.Module):
             gate = gate.index_put((loc,), avail)
             v_uM_hr = v_uM_hr * gate
 
-        # molar flux -> mg/hr (uM -> mg uses each species' own MW; molarity conserved 1:1).
+        # substrate consumption -> mg/hr (uM -> mg via the substrate's own MW).
         sub_mg_hr = v_uM_hr * idx["edge_mw_sub"] * V / UM_PER_MG_PER_L
         dydt = dydt.index_add(0, idx["edge_sub_state"], -sub_mg_hr)
+        # Parent-equivalent product deposition: the product state gains EXACTLY the
+        # mg removed from the substrate (substrate MW for both sides). This keeps a
+        # strict mg mass balance even across MW-changing conjugations (the added
+        # glucuronyl/sulfate/GSH group mass comes from untracked co-substrates).
         if idx["edge_prod_local_valid"].numel() > 0:
             loc = idx["edge_prod_local_valid"]
-            prod_mg_hr = v_uM_hr[loc] * idx["edge_mw_prod_valid"] * V / UM_PER_MG_PER_L
+            prod_mg_hr = sub_mg_hr[loc]
             dydt = dydt.index_add(0, idx["edge_prod_state_valid"], prod_mg_hr)
         if idx["edge_cosub_local_valid"].numel() > 0:
             loc = idx["edge_cosub_local_valid"]
@@ -380,9 +472,30 @@ class MichaelisMentenODE(nn.Module):
         dydt = dydt.index_add(0, p_idx, -dist_flux)
         dydt = dydt.index_add(0, l_idx, dist_flux)
 
-        # --- fixed first-order clearance ---
-        dydt[STATE_IDX["A_napqi"]] = dydt[STATE_IDX["A_napqi"]] - self.k_clear_napqi * y[STATE_IDX["A_napqi"]]
-        dydt[STATE_IDX["A_paraxanthine"]] = dydt[STATE_IDX["A_paraxanthine"]] - self.k_clear_para * y[STATE_IDX["A_paraxanthine"]]
+        # --- Component 2: GSH homeostatic regeneration ---
+        # The hepatic GSH pool refills toward its baseline as it is consumed by
+        # NAPQI conjugation: dA_gsh/dt += k_syn * (baseline - A_gsh). GSH is an
+        # endogenous regenerating species, kept outside the drug-mass invariant.
+        gsh_i = idx["gsh_state"]
+        dydt[gsh_i] = dydt[gsh_i] + idx["k_syn_gsh"] * (idx["gsh_baseline_mg"] - y[gsh_i])
+
+        # --- Component 2: NAPQI -> necrosis toxicity shunt ---
+        # A parallel first-order flux binds NAPQI to liver proteins. When GSH is
+        # plentiful the GST conjugation dominates; once GSH is exhausted NAPQI
+        # accumulates and this shunt (covalent binding / damage) takes over.
+        napqi_i = idx["necrosis_state"]
+        necrosis_flux = self.k_tox * y[napqi_i]
+        dydt[napqi_i] = dydt[napqi_i] - necrosis_flux
+        dydt[STATE_IDX["A_necrosis"]] = dydt[STATE_IDX["A_necrosis"]] + necrosis_flux
+
+        # --- Component 3: dynamic renal clearance into the urine sink ---
+        # Rates are graph-derived (metabolite cleared_via reaction, k_clear). Mass
+        # leaves each terminal metabolite and is accumulated in A_urine_sink, so
+        # eliminated mass is conserved rather than discarded.
+        if idx["clear_state"].numel() > 0:
+            clear_flux = idx["clear_k"] * y[idx["clear_state"]].clamp(min=0.0)
+            dydt = dydt.index_add(0, idx["clear_state"], -clear_flux)
+            dydt[idx["urine_state"]] = dydt[idx["urine_state"]] + clear_flux.sum()
 
         return dydt
 
@@ -457,10 +570,15 @@ class GNNODEModel(nn.Module):
         zero = torch.zeros(())
         dose_apap = dose_by_drug.get("acetaminophen", zero)
         dose_caff = dose_by_drug.get("caffeine", zero)
-        gsh0 = data["endogenous_molecule"].x_state[0, 0].abs() + 1.0
+        # Seed GSH at its homeostatic baseline (the regeneration target).
+        gsh0 = data["endogenous_molecule"].x_state[0, 0].abs()
         return torch.stack([
             dose_apap, zero, zero, zero, gsh0,
             dose_caff, zero, zero, zero,
+            # explicit metabolite states start empty; mass arrives via metabolism.
+            zero, zero, zero, zero,
+            # terminal sinks (necrosis, urine) start empty.
+            zero, zero,
         ])
 
     def build_ode(self, factors: torch.Tensor) -> MichaelisMentenODE:
@@ -525,6 +643,34 @@ def main() -> None:
 
     assert grad_total > 0 and head_grad > 0, "Gradients did not flow through the ODE solver."
     print("Reaction-level Michaelis-Menten GNN-ODE forward and backward pass succeeded.")
+
+    # ---- Phase 3 validation: 24 h mass balance (neutral factors) ----
+    with torch.no_grad():
+        t24 = torch.linspace(0.0, 24.0, steps=200)
+        neutral = torch.ones(data["reaction"].num_nodes, 1)
+        y0 = model.initial_state(data)
+        traj24 = odeint(model.build_ode(neutral), y0, t24, method="rk4",
+                        options={"step_size": 0.01})
+        final = traj24[-1]
+
+        dose_et = ("administration_event", "releases", "drug")
+        dose_total = float(data[dose_et].edge_attr[:, 0].clamp(min=0.0).sum())
+        gsh_i = STATE_IDX["A_gsh"]
+        # Drug-derived invariant excludes the regenerating endogenous GSH pool.
+        drug_idx = [i for i in range(len(STATE_NAMES)) if i != gsh_i]
+        drug_mass = float(final[drug_idx].sum())
+        residual = abs(drug_mass - dose_total)
+
+        print("\n24 h final states (mg):")
+        for name, val in zip(STATE_NAMES, final.tolist()):
+            print(f"  {name:22s} {val:12.4f}")
+        print(f"\nadministered dose          = {dose_total:.4f} mg")
+        print(f"sum(drug-derived states)   = {drug_mass:.4f} mg")
+        print(f"mass-balance residual      = {residual:.3e} mg")
+        print(f"A_urine_sink               = {float(final[STATE_IDX['A_urine_sink']]):.4f} mg")
+        print(f"A_necrosis                 = {float(final[STATE_IDX['A_necrosis']]):.4f} mg")
+        assert residual < 1e-2, f"Mass balance violated: residual {residual:.3e} mg"
+        print("Mass balance holds: drug-derived states conserve the administered dose.")
 
 
 if __name__ == "__main__":
