@@ -1,9 +1,4 @@
-"""Plot plasma concentration for APAP and caffeine; report terminal t½ and Vd.
-
-Run from project root:
-    python -m src.plot_pk_metrics
-    python -m src.plot_pk_metrics --output results/pk_metrics.png --hours 48
-"""
+"""Plot predicted plasma C_p (ng/mL) for APAP and caffeine; report terminal NCA metrics."""
 
 from __future__ import annotations
 
@@ -24,6 +19,7 @@ def plot_pk_metrics(
     output: Path,
     show: bool = False,
 ) -> None:
+    """APAP and caffeine plasma C_p (ng/mL) from integrated ODE trajectory."""
     hours = t.detach().numpy()
 
     fig, ax = plt.subplots(1, 1, figsize=(9, 5))

@@ -1,9 +1,6 @@
-"""Post-ODE PK metrics for APAP and caffeine.
+"""NCA-style PK metrics from integrated ODE trajectories (APAP, caffeine).
 
-All inputs come from an integrated trajectory:
-  traj      [T, 9]   state amounts (mg)
-  t         [T]      time (hours)
-  v_plasma  scalar   plasma volume (L)
+Inputs: traj ``[T, ≥9]`` amounts (mg), t (hr), v_plasma (L).
 """
 
 from __future__ import annotations
@@ -102,8 +99,8 @@ def vd_sys(
     *,
     c_min: float = 1e-6,
 ) -> Tensor:
-    """Apparent systemic Vd(t) = (A_plasma + A_liver) / C_p [L]."""
-    del t  # reserved for future time-window masking
+    """Apparent systemic Vd(t) = (A_plasma + A_liver) / C_p [L]. Systemic = plasma + liver."""
+    del t
     C_p, valid = _plasma_conc_with_floor(A_plasma, v_plasma_L, c_min=c_min)
     A_sys = A_plasma.clamp(min=0.0) + A_liver.clamp(min=0.0)
     vd = A_sys / C_p
@@ -183,13 +180,7 @@ def terminal_half_life(
     terminal_fraction: float = 0.30,
     c_min: float = 1e-6,
 ) -> Tensor:
-    """Terminal-phase t½ (scalar) via log-linear regression of ln(C_p) vs t.
-
-    Fits ln(C_p) = intercept + slope * t over the terminal window (the last
-    `terminal_fraction` of the time array). The elimination rate constant is
-    k = -slope, and t½ = ln(2) / k. Returns NaN if the terminal phase is not
-    clearly declining (k <= 0) or has too few valid points.
-    """
+    """Terminal t½ via log-linear regression of ln(C_p) over the last 30% of t."""
     window = _terminal_window_mask(t, terminal_fraction)
     valid = window & (C_p_mg_L >= c_min)
 
@@ -220,7 +211,7 @@ def terminal_vd_sys(
     *,
     terminal_fraction: float = 0.30,
 ) -> Tensor:
-    """Steady-state Vd_sys (scalar) = median of Vd_sys over the terminal window."""
+    """Steady-state Vd_sys = median Vd over the terminal window."""
     window = _terminal_window_mask(t, terminal_fraction)
     vd_w = vd_sys_vals[window]
     vd_w = vd_w[torch.isfinite(vd_w)]
@@ -240,11 +231,7 @@ def pk_metrics_for_drug(
     c_min: float = 1e-6,
     weight_kg: Tensor | float | None = None,
 ) -> dict[str, Tensor]:
-    """Compute all parent PK metrics for one drug.
-
-    If ``weight_kg`` is given, weight-normalized Vd is also returned in L/kg
-    (the clinical reporting convention, comparable to drug Vd targets in L/kg).
-    """
+    """Parent PK metrics; optional ``weight_kg`` adds L/kg-normalized Vd."""
     amts = parent_amounts(traj, drug)
     C_p = plasma_concentration_mg_L(amts["plasma"], v_plasma_L)
     vd_s = vd_sys(t, amts["plasma"], amts["liver"], v_plasma_L, c_min=c_min)

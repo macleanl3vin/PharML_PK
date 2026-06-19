@@ -6,18 +6,14 @@ try:
     from rdkit import Chem
     from rdkit.Chem import AllChem
     _RDKIT_AVAILABLE = True
-except Exception:  # rdkit is optional; the builder degrades to deterministic zeros
+except Exception:  # RDKit optional; missing fingerprints fall back to zeros
     _RDKIT_AVAILABLE = False
 
-# 2048-bit Morgan fingerprints encode chemical structure for every chemical
-# entity (parent drugs AND metabolites) so the GNN sees real chemistry instead
-# of random noise.
+# Morgan fingerprints for drug and metabolite static features.
 MORGAN_N_BITS = 2048
 MORGAN_RADIUS = 2
 
-# Canonical SMILES for parent drugs and metabolites. Drives the deterministic
-# Morgan fingerprints below. If RDKit is unavailable, or a SMILES is missing /
-# unparseable, the builder falls back to a zero vector -- never random noise.
+# Canonical SMILES; unparseable or missing entries yield a zero vector (never random).
 SMILES = {
     # parent drugs
     "acetaminophen": "CC(=O)Nc1ccc(O)cc1",
@@ -37,18 +33,12 @@ SMILES = {
 def morgan_fingerprint(
     name: str, n_bits: int = MORGAN_N_BITS, radius: int = MORGAN_RADIUS
 ) -> torch.Tensor:
-    """Deterministic Morgan fingerprint (``[n_bits]`` float) for a chemical entity.
-
-    Uses RDKit + the canonical ``SMILES`` table when both are available. Falls
-    back to a deterministic zero vector (NEVER random) when RDKit is missing or
-    the SMILES is absent/unparseable, keeping the graph fully reproducible.
-    """
+    """Morgan fingerprint ``[n_bits]`` from ``SMILES``; zero vector if RDKit or SMILES unavailable."""
     smiles = SMILES.get(name)
     if _RDKIT_AVAILABLE and smiles is not None:
         mol = Chem.MolFromSmiles(smiles)
         if mol is not None:
             try:
-                # Modern, non-deprecated RDKit fingerprint generator.
                 from rdkit.Chem import rdFingerprintGenerator
                 gen = rdFingerprintGenerator.GetMorganGenerator(radius=radius, fpSize=n_bits)
                 bitvect = gen.GetFingerprint(mol)
@@ -145,9 +135,7 @@ REACTION_NODES = [
     "rxn_clearance",
 ]
 
-# Mechanistic class of each reaction node. The GNN gets this as a deterministic
-# one-hot feature so it can learn the differences between enzyme/reaction classes
-# (e.g. an oxidation behaves differently from a glucuronidation).
+# Reaction mechanistic class, encoded as a deterministic one-hot on reaction nodes.
 REACTION_TYPE = {
     "apap_absorption": "absorption",
     "caffeine_absorption": "absorption",
@@ -164,7 +152,6 @@ REACTION_TYPE = {
     "rxn_caff_n7_demethylation": "demethylation",
     "rxn_clearance": "clearance",
 }
-# Stable, sorted category vocabulary -> deterministic one-hot column order.
 REACTION_TYPE_VOCAB = sorted(set(REACTION_TYPE.values()))
 
 
@@ -237,24 +224,19 @@ EDGE_FEATURES = {
         "dose_amount_mg",  # mg
     ],
 
-    # Units must match gnn_ode.build_ode_index / MichaelisMentenODE:
-    #   Km, Ki  -> micromolar (μM)
-    #   Kcat    -> min⁻¹  (×60 in ODE → hr⁻¹)
+    # Km, Ki (μM); Kcat (min⁻¹, converted to hr⁻¹ in the ODE).
     ("enzyme", "catalyzes", "reaction"): [
         "Km",
         "Ki",
         "Kcat",
     ],
 
-    # First-order oral absorption rate constant ka (per hour). Lives on the
-    # drug -> absorption-reaction edge; the ODE reads it directly (NOT metabolism).
+    # First-order absorption ka (hr⁻¹); read by the ODE, not predicted by the GNN.
     ("drug", "absorbed_via", "reaction"): [
         "absorption_rate_ka",
     ],
 
-    # Patient-specific plasma<->liver distribution rates (per hour). Computed
-    # dynamically from drug Vd target x patient weight; the ODE reads them
-    # directly to route mass between the plasma and liver state compartments.
+    # Plasma↔liver transfer rates (hr⁻¹), derived from target Vd and patient weight.
     ("drug", "distributes_to", "compartment"): [
         "k_p2l",
         "k_l2p",
@@ -264,9 +246,7 @@ EDGE_FEATURES = {
         "activity_multiplier",
     ],
 
-    # Competitive inhibition constant Ki (μM). A pure/competitive inhibitor adds
-    # C_inhibitor / Ki to the shared Michaelis-Menten denominator of its target
-    # enzyme. Non-inhibitor pairs default to Ki = 1e6 (effectively infinite).
+    # Competitive Ki (μM); adds C/Ki to the shared enzyme denominator in the ODE.
     ("drug", "competitively_inhibits", "enzyme"): [
         "Ki",
     ],
@@ -297,8 +277,7 @@ EDGE_FEATURES = {
         "current_pool_mass",
     ],
 
-    # First-order renal clearance rate k_clear (hr⁻¹) per terminal metabolite.
-    # The ODE drains the metabolite by k_clear * amount into the urine sink state.
+    # Renal clearance k_clear (hr⁻¹) for terminal metabolites → urine sink.
     ("metabolite", "cleared_via", "reaction"): [
         "k_clear",
     ],
@@ -358,13 +337,12 @@ EDGES = {
         ("CYP1A2", "rxn_cyp_oxidation"),
         ("UGT1A1", "rxn_glucuronidation"), ("SULT1A1", "rxn_sulfation"),
         ("GST", "rxn_gsh_conjugation"), ("CYP1A2", "rxn_caff_n3_demethylation"),
-        # CYP1A2 also drives the minor caffeine demethylation routes.
+        # Minor caffeine demethylation routes (CYP1A2).
         ("CYP1A2", "rxn_caff_n1_demethylation"),
         ("CYP1A2", "rxn_caff_n7_demethylation"),
     ],
 
-    # Caffeine competitively inhibits CYP1A2 (the classic APAP<->caffeine DDI):
-    # it throttles every CYP1A2 reaction, including APAP oxidation to NAPQI.
+    # Caffeine competitively inhibits CYP1A2 → throttles APAP oxidation (DDI).
     ("drug", "competitively_inhibits", "enzyme"): [
         ("caffeine", "CYP1A2"),
     ],
@@ -402,9 +380,7 @@ EDGES = {
         ("rxn_caff_n7_demethylation", "theophylline"),
         ("rxn_gsh_conjugation", "NAPQI_glutathione"),
     ],
-    # Only TERMINAL metabolites are renally cleared. NAPQI is reactive (consumed
-    # by GSH conjugation + necrosis, not excreted); NAPQI_glutathione mass is
-    # routed to the urine sink inside the ODE via the conjugation product.
+    # Terminal metabolites only; reactive NAPQI is consumed, not renally cleared.
     ("metabolite", "cleared_via", "reaction"): [
         ("acetaminophen_glucuronide", "rxn_clearance"),
         ("acetaminophen_sulfate", "rxn_clearance"),
@@ -422,14 +398,11 @@ EDGES = {
     ],
 }
 
-# ============================================================
-# PHASE 3: feature schema split
-# ============================================================
-FILL = 0.0  # default for missing values (use float("nan") if you prefer)
+FILL = 0.0
 NODE_FEATURES_STATE = {
     "endogenous_molecule": ["current_amount_glut"],
     "protein_target": ["current_amount_proteins"],
-    "metabolite": ["initial_concentration_ng_mL"],  # seeded 0 at t0; unused by GNN-ODE (ODE state vector owns PK)
+    "metabolite": ["initial_concentration_ng_mL"],  # t0 seed only; PK lives in ODE state
 }
 
 NODE_FEATURES_STATIC = {
@@ -444,23 +417,18 @@ NODE_FEATURES_STATIC = {
     "endogenous_molecule": ["baseline_homeostatic_pool_glut", "synthesis_rate", "depletion_rate"],
     "compartment": ["volume_L"],
 }
-# Targets are NEVER fed into x (prevents leakage). -> data[nt].y
+# Targets live in data[nt].y only — never concatenated into node features.
 TARGET_FEATURES = {
     "clinical_outcome": ["ALT", "AST", "bilirubin", "toxicity_label"],
     "metabolite": ["target_metabolite_ng_mL", "target_parent_ng_mL"],
 }
-# ============================================================
-# STEP 3: real-value scaffolds (populate incrementally)
-# ============================================================
 NODE_VALUES = {
     "patient": {
-        # Body weight drives the patient-specific tissue-distribution volumes
-        # (see the distribution-rate calculation block below).
+        # Weight scales tissue distribution volumes (see DISTRIBUTION_RATES).
         "patient_0": {"weight_kg": 70.0},
     },
     "drug": {
-        # target_vd_L_kg: literature steady-state Vd (L/kg). Combined with patient
-        # weight it sets the apparent Vd the plasma<->liver transfer must reproduce.
+        # Literature Vd (L/kg); with weight sets plasma↔liver transfer in the ODE.
         "acetaminophen": {"molecular_weight": 151.16, "is_parent_drug": 1.0, "target_vd_L_kg": 0.9},
         "caffeine":      {"molecular_weight": 194.19, "is_parent_drug": 1.0, "target_vd_L_kg": 0.7},
     },
@@ -474,7 +442,7 @@ NODE_VALUES = {
         "GST":     {"baseline_abundance_pmol_mg": 100.0, "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 48.0},
     },
     "compartment": {
-        # Distribution volumes (L). Liver volume drives the metabolism mg<->uM conversion.
+        # Liver volume converts liver mass (mg) ↔ μM in enzymatic fluxes.
         "plasma":     {"volume_L": 3.0},
         "liver":      {"volume_L": 1.5},
         "urine_sink": {"volume_L": 1.0},
@@ -484,24 +452,13 @@ NODE_VALUES = {
         "glutathione": {
             "current_amount_glut": 3000.0,
             "baseline_homeostatic_pool_glut": 3000.0,
-            # First-order homeostatic regeneration k_syn (hr⁻¹): the ODE adds
-            # synthesis_rate * (baseline - current) so the pool refills as it is
-            # consumed by NAPQI conjugation.
+            # First-order refill toward baseline (hr⁻¹) after NAPQI conjugation.
             "synthesis_rate": 0.1,
             "depletion_rate": 0.0,
         },
     },
 }
-# ============================================================
-# Patient-specific plasma<->liver distribution rates (drug-agnostic)
-# ------------------------------------------------------------
-# The apparent Vd is moved OUT of the hardcoded ODE and INTO the graph: each
-# drug's plasma->liver rate k_p2l is derived from its literature Vd target and
-# the patient's body weight, so a heavier patient automatically gets wider
-# tissue distribution. With k_l2p held fixed, a 2-compartment system at
-# pseudo-equilibrium gives  Vd_apparent = V_plasma_L * (1 + k_p2l / k_l2p),
-# hence  k_p2l = (Vd_target_L / V_plasma_L - 1) * k_l2p.
-# ============================================================
+# k_p2l from target Vd: at pseudo-equilibrium, Vd_app ≈ V_plasma * (1 + k_p2l / k_l2p).
 PATIENT_WEIGHT_KG = NODE_VALUES["patient"]["patient_0"]["weight_kg"]
 V_PLASMA_L = NODE_VALUES["compartment"]["plasma"]["volume_L"]
 K_L2P_FIXED = 1.0
@@ -518,10 +475,7 @@ DISTRIBUTION_RATES = {
     for name in ("acetaminophen", "caffeine")
 }
 
-# Catalytic edge units (must match gnn_ode.py):
-#   Km, Ki  -> μM
-#   Kcat    -> min⁻¹
-#   ka      -> hr⁻¹
+# Catalytic edge units: Km/Ki (μM), Kcat (min⁻¹), ka (hr⁻¹).
 EDGE_VALUES = {
     ("drug", "distributes_to", "compartment"): {
         ("acetaminophen", "liver"): DISTRIBUTION_RATES["acetaminophen"],
@@ -550,8 +504,7 @@ EDGE_VALUES = {
         ("UGT1A1", "rxn_glucuronidation"):        {"Km": 3500.0, "Ki": 1e6, "Kcat": 5.0},
         ("SULT1A1", "rxn_sulfation"):             {"Km": 250.0,  "Ki": 1e6, "Kcat": 3.3},
         ("GST", "rxn_gsh_conjugation"):           {"Km": 900.0,  "Ki": 1e6, "Kcat": 6.1},
-        # Caffeine demethylation split (CYP1A2). Kcat scaled to the clinical
-        # formation ratio paraxanthine : theobromine : theophylline ~ 84 : 12 : 4.
+        # Caffeine demethylation Kcat split ~ 84:12:4 (paraxanthine:theobromine:theophylline).
         ("CYP1A2", "rxn_caff_n3_demethylation"): {"Km": 500.0,  "Ki": 1e6, "Kcat": 2.9},
         ("CYP1A2", "rxn_caff_n1_demethylation"): {"Km": 500.0,  "Ki": 1e6, "Kcat": 0.41},
         ("CYP1A2", "rxn_caff_n7_demethylation"): {"Km": 500.0,  "Ki": 1e6, "Kcat": 0.14},
@@ -559,7 +512,7 @@ EDGE_VALUES = {
     ("drug", "competitively_inhibits", "enzyme"): {
         ("caffeine", "CYP1A2"): {"Ki": 150.0},  # μM
     },
-    # Terminal-metabolite renal clearance rates (hr⁻¹) -> urine sink.
+    # Terminal metabolite renal clearance (hr⁻¹).
     ("metabolite", "cleared_via", "reaction"): {
         ("acetaminophen_glucuronide", "rxn_clearance"): {"k_clear": 0.5},
         ("acetaminophen_sulfate", "rxn_clearance"):     {"k_clear": 0.5},
@@ -580,15 +533,12 @@ EDGE_VALUES = {
         ("patient_0", "GST"):     {"activity_multiplier": 1.0},
     },
 }
-# ============================================================
-# STEP 4: tensor builders
-# ============================================================
 def _to_float(v, default=FILL):
     if isinstance(v, bool):
         return float(v)
     if isinstance(v, (int, float)):
         return float(v)
-    return default  # strings / datetime / None -> encode later
+    return default
 def _build_x_state(node_type, value_table):
     """Deterministic dynamic-state features (seeded at t0); zeros when unpopulated."""
     names = NODE_NAMES[node_type]
@@ -601,20 +551,13 @@ def _build_x_state(node_type, value_table):
 
 
 def build_node_tensors(node_type, value_table):
-    """Return (x_state, x_static) for a node type, ordered by NODE_NAMES.
-
-    No randomness anywhere in the graph: metabolites carry deterministic 2048-bit
-    Morgan fingerprints, reactions carry a one-hot reaction-type vector, and every
-    other static feature is read from the value table or zero-filled. Random noise
-    would destroy the gradient signal, so it is never used.
-    """
+    """Build ``(x_state, x_static)`` for one node type; all features deterministic."""
     names = NODE_NAMES[node_type]
     static_cols = NODE_FEATURES_STATIC.get(node_type, [])
 
     x_state = _build_x_state(node_type, value_table)
 
     if node_type == "metabolite":
-        # Treat metabolites exactly like parent drugs: real chemistry via Morgan FP.
         x_static = torch.stack([morgan_fingerprint(name) for name in names])
     elif node_type == "reaction":
         x_static = reaction_one_hot()
@@ -623,22 +566,19 @@ def build_node_tensors(node_type, value_table):
         rows = [[_to_float(table.get(name, {}).get(c, FILL)) for c in static_cols] for name in names]
         x_static = torch.tensor(rows, dtype=torch.float).reshape(len(names), len(static_cols))
     else:
-        # Unpopulated structural nodes (administration_event, protein_target,
-        # clinical_outcome): deterministic zeros, never randn. Keep >=1 column so
-        # the lazy encoder always receives a feature dimension.
+        # Structural nodes without populated values: zero pad (≥1 col for lazy encoder).
         x_static = torch.zeros(len(names), max(len(static_cols), 1))
 
-    # Guarantee the encoder input (concat of state + static) is never empty.
     if x_state.size(1) == 0 and x_static.size(1) == 0:
         x_static = torch.zeros(len(names), 1)
 
     return x_state, x_static
 def build_target_tensor(node_type):
-    """Placeholder y. Will become a [N, T] / [N, T, k] time-series later."""
+    """Placeholder supervision tensor; shape will become ``[N, T, k]`` with real data."""
     cols = TARGET_FEATURES.get(node_type)
     if not cols:
         return None
-    return torch.zeros(len(NODE_NAMES[node_type]), len(cols))  # -> [N, T] in Phase 5
+    return torch.zeros(len(NODE_NAMES[node_type]), len(cols))
 def build_edge_attr(edge_type, pairs, value_table):
     """Map kinetic constants onto edges; deterministic zero fallback if unpopulated."""
     cols = EDGE_FEATURES.get(edge_type)
@@ -664,13 +604,9 @@ def validate_catalytic_edge_values(edge_values=EDGE_VALUES) -> None:
             if key in rec:
                 assert torch.isfinite(torch.tensor(float(rec[key]))), f"{pair}: {key} must be finite"
 
-# ============================================================
-# STEP 4/5: assemble the graph
-# ============================================================
 def build_dummy_graph(node_values=NODE_VALUES, edge_values=EDGE_VALUES) -> HeteroData:
     validate_catalytic_edge_values(edge_values)
     data = HeteroData()
-    # --- nodes: separate dynamic state vs static params, isolate targets ---
     for nt in node_types:
         data[nt].num_nodes = len(NODE_NAMES[nt])
         data[nt].node_names = NODE_NAMES[nt]
@@ -680,7 +616,6 @@ def build_dummy_graph(node_values=NODE_VALUES, edge_values=EDGE_VALUES) -> Heter
         y = build_target_tensor(nt)
         if y is not None:
             data[nt].y = y
-    # --- edges: real connectivity + kinetic edge_attr ---
     for (src, rel, dst), pairs in EDGES.items():
         s = [node_to_idx[src][a] for a, _ in pairs]
         d = [node_to_idx[dst][b] for _, b in pairs]
@@ -693,11 +628,8 @@ def build_dummy_graph(node_values=NODE_VALUES, edge_values=EDGE_VALUES) -> Heter
 
 def validate_graph(data):
     print("Running graph validation...")
-
-    # Built-in PyG validation
     data.validate(raise_on_error=True)
 
-    # Validate node tensors
     for node_type in data.node_types:
         store = data[node_type]
 
@@ -715,7 +647,6 @@ def validate_graph(data):
             assert torch.isfinite(store.y).all(), f"{node_type}.y has NaN or inf"
             assert store.y.size(0) == store.num_nodes, f"{node_type}.y row mismatch"
 
-    # Validate edge tensors
     for edge_type in data.edge_types:
         store = data[edge_type]
         src_type, rel_type, dst_type = edge_type

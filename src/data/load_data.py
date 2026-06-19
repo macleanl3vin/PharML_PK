@@ -11,15 +11,7 @@ def get_data_dir() -> Path:
 
 
 def load_raw_csv(filename: str) -> pd.DataFrame:
-    """
-    Load a CSV from data/raw/.
-
-    Args:
-        filename: Name of the file under data/raw/.
-
-    Returns:
-        DataFrame with the file contents.
-    """
+    """Load ``data/raw/{filename}``."""
     path = get_data_dir() / "raw" / filename
     if not path.exists():
         raise FileNotFoundError(f"Raw data file not found: {path}")
