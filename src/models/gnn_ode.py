@@ -358,7 +358,9 @@ class MichaelisMentenODE(nn.Module):
         dydt[gsh_i] = dydt[gsh_i] + idx["k_syn_gsh"] * (idx["gsh_baseline_mg"] - y[gsh_i])
 
         napqi_i = idx["necrosis_state"]
-        necrosis_flux = self.k_tox * y[napqi_i]
+
+        gsh_avail = y[gsh_i] / (y[gsh_i] + COSUB_GATE_MG)
+        necrosis_flux = self.k_tox * y[napqi_i] * (1.0 - gsh_avail)
         dydt[napqi_i] = dydt[napqi_i] - necrosis_flux
         dydt[STATE_IDX["A_necrosis"]] = dydt[STATE_IDX["A_necrosis"]] + necrosis_flux
 
