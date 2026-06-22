@@ -323,7 +323,7 @@ EDGES = {
     ("compartment", "partitions_into", "reaction"): [
         ("liver", "apap_distribution"), ("liver", "caffeine_distribution"),
     ],
-    ("reaction", "paritions_into", "compartment"): [
+    ("reaction", "partitions_into", "compartment"): [
         ("apap_distribution", "plasma"), ("caffeine_distribution", "plasma"),
     ],
 
@@ -488,7 +488,7 @@ EDGE_VALUES = {
         },
     },
     ("administration_event", "releases", "drug"): {
-        ("admin_event_0", "acetaminophen"): {"dose_amount_mg": 1000.0},
+        ("admin_event_0", "acetaminophen"): {"dose_amount_mg": 5000.0},
         ("admin_event_0", "caffeine"):      {"dose_amount_mg": 200.0},
     },
     ("endogenous_molecule", "depleted_by", "reaction"): {

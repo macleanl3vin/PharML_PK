@@ -1,0 +1,254 @@
+record_type,attribute,source_node,target_node,units,notes
+NODE,,patient_0,,,PyG node instance; type=patient
+NODE,,admin_event_0,,,PyG node instance; type=administration_event
+NODE,,acetaminophen,,,PyG node instance; type=drug; parent APAP
+NODE,,caffeine,,,PyG node instance; type=drug; parent caffeine
+NODE,,plasma,,,PyG node instance; type=compartment; V=3.0 L
+NODE,,liver,,,PyG node instance; type=compartment; V=1.5 L; metabolic site
+NODE,,urine_sink,,,PyG node instance; type=compartment; V=1.0 L; graph sink for renal excretion
+NODE,,CYP2E1,,,PyG node instance; type=enzyme
+NODE,,CYP1A2,,,PyG node instance; type=enzyme; DDI target (caffeine inhibits)
+NODE,,CYP3A4,,,PyG node instance; type=enzyme
+NODE,,UGT1A1,,,PyG node instance; type=enzyme
+NODE,,SULT1A1,,,PyG node instance; type=enzyme
+NODE,,GST,,,PyG node instance; type=enzyme; NAPQI conjugation
+NODE,,apap_absorption,,,PyG node instance; type=reaction; class=absorption
+NODE,,caffeine_absorption,,,PyG node instance; type=reaction; class=absorption
+NODE,,apap_distribution,,,PyG node instance; type=reaction; class=distribution
+NODE,,caffeine_distribution,,,PyG node instance; type=reaction; class=distribution
+NODE,,rxn_cyp_oxidation,,,PyG node instance; type=reaction; class=oxidation; APAP→NAPQI
+NODE,,rxn_glucuronidation,,,PyG node instance; type=reaction; class=glucuronidation
+NODE,,rxn_sulfation,,,PyG node instance; type=reaction; class=sulfation
+NODE,,rxn_gsh_conjugation,,,PyG node instance; type=reaction; class=gsh_conjugation; NAPQI detox
+NODE,,rxn_gsh_regeneration,,,PyG node instance; type=reaction; class=gsh_regeneration
+NODE,,rxn_covalent_binding,,,PyG node instance; type=reaction; class=covalent_binding; topology only (flux via ODE k_tox)
+NODE,,rxn_caff_n3_demethylation,,,PyG node instance; type=reaction; class=demethylation; →paraxanthine
+NODE,,rxn_caff_n1_demethylation,,,PyG node instance; type=reaction; class=demethylation; →theobromine
+NODE,,rxn_caff_n7_demethylation,,,PyG node instance; type=reaction; class=demethylation; →theophylline
+NODE,,rxn_clearance,,,PyG node instance; type=reaction; class=clearance; renal sink
+NODE,,NAPQI,,,PyG node instance; type=metabolite; reactive intermediate
+NODE,,acetaminophen_glucuronide,,,PyG node instance; type=metabolite
+NODE,,acetaminophen_sulfate,,,PyG node instance; type=metabolite
+NODE,,NAPQI_glutathione,,,PyG node instance; type=metabolite; GSH conjugate (mass routed to A_urine_sink in ODE)
+NODE,,paraxanthine,,,PyG node instance; type=metabolite
+NODE,,theobromine,,,PyG node instance; type=metabolite
+NODE,,theophylline,,,PyG node instance; type=metabolite
+NODE,,glutathione,,,PyG node instance; type=endogenous_molecule; maps to ODE A_gsh
+NODE,,hepatic_proteins,,,PyG node instance; type=protein_target; covalent-binding substrate (topology)
+NODE,,clinical_outcome_0,,,PyG node instance; type=clinical_outcome; supervision target
+NODE,age_yrs,patient,,yrs,Static node attribute (x_static); not yet populated in NODE_VALUES
+NODE,weight_kg,patient,,kg,Static node attribute; patient_0=70.0; drives k_p2l / apparent Vd
+NODE,height_cm,patient,,cm,Static node attribute; not yet populated
+NODE,sex_encoded,patient,,categorical,Static node attribute; not yet populated
+NODE,pH,patient,,unitless,Static node attribute; not yet populated
+NODE,route_of_admin,administration_event,,categorical,Static node attribute; zeros placeholder
+NODE,time_of_admin,administration_event,,hr,Static node attribute; zeros placeholder
+NODE,molecular_weight,drug,,g/mol,Static node attribute; APAP=151.16; caffeine=194.19
+NODE,is_parent_drug,drug,,0/1,Static node attribute; both parents=1
+NODE,target_vd_L_kg,drug,,L/kg,In NODE_VALUES only (not x_static column); APAP=0.9; caffeine=0.7; drives k_p2l
+NODE,volume_L,compartment,,L,Static node attribute; plasma=3.0; liver=1.5; urine_sink=1.0
+NODE,PGx_phenotype_multiplier,enzyme,,unitless,Static node attribute; ODE reads x_static col 0; scales Vmax
+NODE,is_active,enzyme,,0/1,Static node attribute; ODE reads x_static col 1
+NODE,protein_half_life_hrs,enzyme,,hr,Static node attribute; ODE reads x_static col 2
+NODE,baseline_abundance_pmol_mg,enzyme,,pmol/mg,Static node attribute; ODE reads x_static col 3; IVIVE scale-up
+NODE,reaction_type_one_hot,reaction,,one-hot(10),Built at graph time from REACTION_TYPE; replaces declared E_k
+NODE,E_k,reaction,,unitless,Declared in schema but overridden by one-hot at build time
+NODE,morgan_fingerprint,metabolite,,bits(2048),Built from SMILES via RDKit; radius=2; zeros if RDKit missing
+NODE,is_hepatoxic,metabolite,,0/1,Declared in schema but overridden by fingerprint stack
+NODE,Molecular_weight_g_mol,metabolite,,g/mol,Declared in schema but overridden by fingerprint stack
+NODE,initial_concentration_ng_mL,metabolite,,ng/mL,Dynamic x_state seed at t0; PK mass lives in ODE state vector
+NODE,baseline_homeostatic_pool_glut,endogenous_molecule,,mg,Static node attribute; glutathione=3000; GSH regeneration target
+NODE,synthesis_rate,endogenous_molecule,,hr^-1,Static node attribute; k_syn_gsh=0.1; ODE: dA_gsh += k_syn*(baseline-A_gsh)
+NODE,depletion_rate,endogenous_molecule,,hr^-1,Static node attribute; glutathione=0.0
+NODE,current_amount_glut,endogenous_molecule,,mg,Dynamic x_state; seeds ODE A_gsh at t0 (=3000)
+NODE,current_amount_proteins,protein_target,,mg,Dynamic x_state; zeros placeholder
+NODE,ALT,clinical_outcome,,U/L,Target only (data.y); never fed to GNN encoder
+NODE,AST,clinical_outcome,,U/L,Target only (data.y)
+NODE,bilirubin,clinical_outcome,,mg/dL,Target only (data.y)
+NODE,toxicity_label,clinical_outcome,,0/1,Target only (data.y)
+NODE,target_metabolite_ng_mL,metabolite,,ng/mL,Target only (data.y); supervised metabolite curve
+NODE,target_parent_ng_mL,metabolite,,ng/mL,Target only (data.y); supervised parent curve
+EDGE,receives,patient_0,admin_event_0,,Patient linked to dosing event; carries baseline labs
+EDGE,expresses,patient_0,CYP2E1,,Patient enzyme expression; activity_multiplier=1.0
+EDGE,expresses,patient_0,CYP1A2,,Patient enzyme expression; activity_multiplier=1.0
+EDGE,expresses,patient_0,CYP3A4,,Patient enzyme expression; activity_multiplier=1.0
+EDGE,expresses,patient_0,UGT1A1,,Patient enzyme expression; activity_multiplier=1.0
+EDGE,expresses,patient_0,SULT1A1,,Patient enzyme expression; activity_multiplier=1.0
+EDGE,expresses,patient_0,GST,,Patient enzyme expression; activity_multiplier=1.0
+EDGE,releases,admin_event_0,acetaminophen,,Oral dose; dose_amount_mg=1000; seeds ODE A_gut_apap
+EDGE,releases,admin_event_0,caffeine,,Oral dose; dose_amount_mg=200; seeds ODE A_gut_caffeine
+EDGE,absorbed_via,acetaminophen,apap_absorption,,First-order gut absorption; ka=1.0 hr^-1
+EDGE,absorbed_via,caffeine,caffeine_absorption,,First-order gut absorption; ka=1.2 hr^-1
+EDGE,enters,apap_absorption,plasma,,Absorbed mass enters plasma pool
+EDGE,enters,caffeine_absorption,plasma,,Absorbed mass enters plasma pool
+EDGE,supplies_mass_to,plasma,apap_distribution,,Distribution topology: plasma source
+EDGE,supplies_mass_to,plasma,caffeine_distribution,,Distribution topology: plasma source
+EDGE,supplies_mass_to,apap_distribution,plasma,,Distribution return flux to plasma
+EDGE,supplies_mass_to,caffeine_distribution,plasma,,Distribution return flux to plasma
+EDGE,partitions_into,apap_distribution,liver,,Plasma→liver partition during distribution
+EDGE,partitions_into,caffeine_distribution,liver,,Plasma→liver partition during distribution
+EDGE,partitions_into,liver,apap_distribution,,Liver→plasma reverse partition
+EDGE,partitions_into,liver,caffeine_distribution,,Liver→plasma reverse partition
+EDGE,contains,liver,CYP2E1,,Hepatic enzyme localization
+EDGE,contains,liver,CYP1A2,,Hepatic enzyme localization
+EDGE,contains,liver,CYP3A4,,Hepatic enzyme localization
+EDGE,contains,liver,UGT1A1,,Hepatic enzyme localization
+EDGE,contains,liver,SULT1A1,,Hepatic enzyme localization
+EDGE,contains,liver,GST,,Hepatic enzyme localization
+EDGE,catalyzes,CYP2E1,rxn_cyp_oxidation,,Km=1290 μM; Kcat=4.2 min^-1
+EDGE,catalyzes,CYP3A4,rxn_cyp_oxidation,,Km=6890 μM; Kcat=2.1 min^-1
+EDGE,catalyzes,CYP1A2,rxn_cyp_oxidation,,Km=2700 μM; Kcat=1.8 min^-1
+EDGE,catalyzes,UGT1A1,rxn_glucuronidation,,Km=3500 μM; Kcat=5.0 min^-1
+EDGE,catalyzes,SULT1A1,rxn_sulfation,,Km=250 μM; Kcat=3.3 min^-1
+EDGE,catalyzes,GST,rxn_gsh_conjugation,,Km=900 μM; Kcat=6.1 min^-1
+EDGE,catalyzes,CYP1A2,rxn_caff_n3_demethylation,,Km=500 μM; Kcat=2.9 min^-1; major caffeine route
+EDGE,catalyzes,CYP1A2,rxn_caff_n1_demethylation,,Km=500 μM; Kcat=0.41 min^-1; →theobromine
+EDGE,catalyzes,CYP1A2,rxn_caff_n7_demethylation,,Km=500 μM; Kcat=0.14 min^-1; →theophylline
+EDGE,competitively_inhibits,caffeine,CYP1A2,,DDI: Ki=150 μM; adds C_caff/Ki to shared CYP1A2 MM denominator
+EDGE,distributes_to,acetaminophen,liver,,k_p2l/k_l2p from Vd target; weight-scaled
+EDGE,distributes_to,caffeine,liver,,k_p2l/k_l2p from Vd target; weight-scaled
+EDGE,reactant_in,acetaminophen,rxn_cyp_oxidation,,Substrate for CYP oxidation
+EDGE,reactant_in,acetaminophen,rxn_glucuronidation,,Substrate for glucuronidation
+EDGE,reactant_in,acetaminophen,rxn_sulfation,,Substrate for sulfation
+EDGE,reactant_in,caffeine,rxn_caff_n3_demethylation,,Substrate for N3-demethylation
+EDGE,reactant_in,caffeine,rxn_caff_n1_demethylation,,Substrate for N1-demethylation
+EDGE,reactant_in,caffeine,rxn_caff_n7_demethylation,,Substrate for N7-demethylation
+EDGE,reactant_in,NAPQI,rxn_gsh_conjugation,,Reactive metabolite → GSH conjugate
+EDGE,reactant_in,NAPQI,rxn_covalent_binding,,Topology for covalent binding (ODE uses k_tox shunt)
+EDGE,reactant_in,hepatic_proteins,rxn_covalent_binding,,Protein target for covalent binding (topology)
+EDGE,reactant_in,glutathione,rxn_gsh_conjugation,,Co-substrate; consumes ODE A_gsh
+EDGE,depleted_by,glutathione,rxn_gsh_conjugation,,GSH pool depleted by conjugation flux
+EDGE,restores_mass_to,rxn_gsh_regeneration,glutathione,,GSH resynthesis topology (ODE uses node synthesis_rate)
+EDGE,produces,rxn_cyp_oxidation,NAPQI,,Product deposition → ODE A_napqi
+EDGE,produces,rxn_glucuronidation,acetaminophen_glucuronide,,Product deposition → ODE A_liver_apap_gluc
+EDGE,produces,rxn_sulfation,acetaminophen_sulfate,,Product deposition → ODE A_liver_apap_sulf
+EDGE,produces,rxn_caff_n3_demethylation,paraxanthine,,Product deposition → ODE A_paraxanthine
+EDGE,produces,rxn_caff_n1_demethylation,theobromine,,Product deposition → ODE A_liver_theobromine
+EDGE,produces,rxn_caff_n7_demethylation,theophylline,,Product deposition → ODE A_liver_theophylline
+EDGE,produces,rxn_gsh_conjugation,NAPQI_glutathione,,Product mass routed to ODE A_urine_sink (parent-equivalent mg)
+EDGE,cleared_via,acetaminophen_glucuronide,rxn_clearance,,k_clear=0.5 hr^-1 → A_urine_sink
+EDGE,cleared_via,acetaminophen_sulfate,rxn_clearance,,k_clear=0.5 hr^-1 → A_urine_sink
+EDGE,cleared_via,paraxanthine,rxn_clearance,,k_clear=0.3 hr^-1 → A_urine_sink
+EDGE,cleared_via,theobromine,rxn_clearance,,k_clear=0.2 hr^-1 → A_urine_sink
+EDGE,cleared_via,theophylline,rxn_clearance,,k_clear=0.2 hr^-1 → A_urine_sink
+EDGE,excretes_to,rxn_clearance,urine_sink,,Renal excretion topology; mass accumulates in ODE A_urine_sink
+EDGE,measured_liver_panel,liver,clinical_outcome_0,,Hepatic biomarker readout edge
+EDGE,measured_plasma_panel,plasma,clinical_outcome_0,,Plasma biomarker readout edge
+EDGE,creatinine,patient_0,admin_event_0,mg/dL,Edge attribute; value=1.0; patient baseline lab
+EDGE,ALT,patient_0,admin_event_0,U/L,Edge attribute; value=25.0; patient baseline lab
+EDGE,AST,patient_0,admin_event_0,U/L,Edge attribute; value=22.0; patient baseline lab
+EDGE,bilirubin,patient_0,admin_event_0,mg/dL,Edge attribute; value=0.8; patient baseline lab
+EDGE,albumin,patient_0,admin_event_0,g/dL,Edge attribute; value=4.2; patient baseline lab
+EDGE,dose_amount_mg,admin_event_0,acetaminophen,mg,Edge attribute; value=1000; seeds y0 A_gut_apap
+EDGE,dose_amount_mg,admin_event_0,caffeine,mg,Edge attribute; value=200; seeds y0 A_gut_caffeine
+EDGE,Km,CYP2E1,rxn_cyp_oxidation,μM,Edge attribute; value=1290
+EDGE,Ki,CYP2E1,rxn_cyp_oxidation,μM,Edge attribute; value=1e6 (no inhibition on this edge)
+EDGE,Kcat,CYP2E1,rxn_cyp_oxidation,min^-1,Edge attribute; value=4.2; ×60 → hr^-1 in ODE
+EDGE,Km,CYP3A4,rxn_cyp_oxidation,μM,Edge attribute; value=6890
+EDGE,Ki,CYP3A4,rxn_cyp_oxidation,μM,Edge attribute; value=1e6
+EDGE,Kcat,CYP3A4,rxn_cyp_oxidation,min^-1,Edge attribute; value=2.1
+EDGE,Km,CYP1A2,rxn_cyp_oxidation,μM,Edge attribute; value=2700
+EDGE,Ki,CYP1A2,rxn_cyp_oxidation,μM,Edge attribute; value=1e6
+EDGE,Kcat,CYP1A2,rxn_cyp_oxidation,min^-1,Edge attribute; value=1.8
+EDGE,Km,UGT1A1,rxn_glucuronidation,μM,Edge attribute; value=3500
+EDGE,Ki,UGT1A1,rxn_glucuronidation,μM,Edge attribute; value=1e6
+EDGE,Kcat,UGT1A1,rxn_glucuronidation,min^-1,Edge attribute; value=5.0
+EDGE,Km,SULT1A1,rxn_sulfation,μM,Edge attribute; value=250
+EDGE,Ki,SULT1A1,rxn_sulfation,μM,Edge attribute; value=1e6
+EDGE,Kcat,SULT1A1,rxn_sulfation,min^-1,Edge attribute; value=3.3
+EDGE,Km,GST,rxn_gsh_conjugation,μM,Edge attribute; value=900
+EDGE,Ki,GST,rxn_gsh_conjugation,μM,Edge attribute; value=1e6
+EDGE,Kcat,GST,rxn_gsh_conjugation,min^-1,Edge attribute; value=6.1
+EDGE,Km,CYP1A2,rxn_caff_n3_demethylation,μM,Edge attribute; value=500
+EDGE,Ki,CYP1A2,rxn_caff_n3_demethylation,μM,Edge attribute; value=1e6
+EDGE,Kcat,CYP1A2,rxn_caff_n3_demethylation,min^-1,Edge attribute; value=2.9
+EDGE,Km,CYP1A2,rxn_caff_n1_demethylation,μM,Edge attribute; value=500
+EDGE,Ki,CYP1A2,rxn_caff_n1_demethylation,μM,Edge attribute; value=1e6
+EDGE,Kcat,CYP1A2,rxn_caff_n1_demethylation,min^-1,Edge attribute; value=0.41
+EDGE,Km,CYP1A2,rxn_caff_n7_demethylation,μM,Edge attribute; value=500
+EDGE,Ki,CYP1A2,rxn_caff_n7_demethylation,μM,Edge attribute; value=1e6
+EDGE,Kcat,CYP1A2,rxn_caff_n7_demethylation,min^-1,Edge attribute; value=0.14
+EDGE,absorption_rate_ka,acetaminophen,apap_absorption,hr^-1,Edge attribute; value=1.0; ODE first-order absorption
+EDGE,absorption_rate_ka,caffeine,caffeine_absorption,hr^-1,Edge attribute; value=1.2; ODE first-order absorption
+EDGE,k_p2l,acetaminophen,liver,hr^-1,Edge attribute; graph-derived from Vd=0.9 L/kg × 70 kg
+EDGE,k_l2p,acetaminophen,liver,hr^-1,Edge attribute; value=1.0 fixed
+EDGE,k_p2l,caffeine,liver,hr^-1,Edge attribute; graph-derived from Vd=0.7 L/kg × 70 kg
+EDGE,k_l2p,caffeine,liver,hr^-1,Edge attribute; value=1.0 fixed
+EDGE,activity_multiplier,patient_0,CYP2E1,unitless,Edge attribute; value=1.0; scales effective enzyme abundance
+EDGE,activity_multiplier,patient_0,CYP1A2,unitless,Edge attribute; value=1.0
+EDGE,activity_multiplier,patient_0,CYP3A4,unitless,Edge attribute; value=1.0
+EDGE,activity_multiplier,patient_0,UGT1A1,unitless,Edge attribute; value=1.0
+EDGE,activity_multiplier,patient_0,SULT1A1,unitless,Edge attribute; value=1.0
+EDGE,activity_multiplier,patient_0,GST,unitless,Edge attribute; value=1.0
+EDGE,Ki,caffeine,CYP1A2,μM,Edge attribute; value=150; competitive DDI on shared CYP1A2 denominator
+EDGE,consumption_rate,acetaminophen,rxn_cyp_oxidation,hr^-1,Edge attribute; SCHEMA_ONLY (topology marker; flux from MM ODE)
+EDGE,consumption_rate,acetaminophen,rxn_glucuronidation,hr^-1,Edge attribute; SCHEMA_ONLY
+EDGE,consumption_rate,acetaminophen,rxn_sulfation,hr^-1,Edge attribute; SCHEMA_ONLY
+EDGE,consumption_rate,caffeine,rxn_caff_n3_demethylation,hr^-1,Edge attribute; SCHEMA_ONLY
+EDGE,consumption_rate,caffeine,rxn_caff_n1_demethylation,hr^-1,Edge attribute; SCHEMA_ONLY
+EDGE,consumption_rate,caffeine,rxn_caff_n7_demethylation,hr^-1,Edge attribute; SCHEMA_ONLY
+EDGE,consumption_rate,NAPQI,rxn_gsh_conjugation,hr^-1,Edge attribute; SCHEMA_ONLY
+EDGE,consumption_rate,NAPQI,rxn_covalent_binding,hr^-1,Edge attribute; SCHEMA_ONLY
+EDGE,stoichiometric_yield,rxn_cyp_oxidation,NAPQI,unitless,Edge attribute; SCHEMA_ONLY; parent-equivalent 1:1 mg in ODE
+EDGE,stoichiometric_yield,rxn_glucuronidation,acetaminophen_glucuronide,unitless,Edge attribute; SCHEMA_ONLY
+EDGE,stoichiometric_yield,rxn_sulfation,acetaminophen_sulfate,unitless,Edge attribute; SCHEMA_ONLY
+EDGE,stoichiometric_yield,rxn_caff_n3_demethylation,paraxanthine,unitless,Edge attribute; SCHEMA_ONLY
+EDGE,stoichiometric_yield,rxn_caff_n1_demethylation,theobromine,unitless,Edge attribute; SCHEMA_ONLY
+EDGE,stoichiometric_yield,rxn_caff_n7_demethylation,theophylline,unitless,Edge attribute; SCHEMA_ONLY
+EDGE,stoichiometric_yield,rxn_gsh_conjugation,NAPQI_glutathione,unitless,Edge attribute; SCHEMA_ONLY
+EDGE,binding_rate,hepatic_proteins,rxn_covalent_binding,hr^-1,Edge attribute; SCHEMA_ONLY; not wired (ODE uses k_tox)
+EDGE,necrosis_fraction,hepatic_proteins,rxn_covalent_binding,unitless,Edge attribute; SCHEMA_ONLY; not wired (ODE uses k_tox)
+EDGE,synthesis_rate,rxn_gsh_regeneration,glutathione,hr^-1,Edge attribute; SCHEMA_ONLY; ODE reads node synthesis_rate instead
+EDGE,depletion_rate,glutathione,rxn_gsh_conjugation,hr^-1,Edge attribute; value=0.0
+EDGE,current_pool_mass,glutathione,rxn_gsh_conjugation,mg,Edge attribute; value=3000; co-substrate gate reference
+EDGE,k_clear,acetaminophen_glucuronide,rxn_clearance,hr^-1,Edge attribute; value=0.5; drains to A_urine_sink
+EDGE,k_clear,acetaminophen_sulfate,rxn_clearance,hr^-1,Edge attribute; value=0.5; drains to A_urine_sink
+EDGE,k_clear,paraxanthine,rxn_clearance,hr^-1,Edge attribute; value=0.3; drains to A_urine_sink
+EDGE,k_clear,theobromine,rxn_clearance,hr^-1,Edge attribute; value=0.2; drains to A_urine_sink
+EDGE,k_clear,theophylline,rxn_clearance,hr^-1,Edge attribute; value=0.2; drains to A_urine_sink
+EDGE,excretion_rate,rxn_clearance,urine_sink,hr^-1,Edge attribute; SCHEMA_ONLY; clearance uses k_clear on metabolite edges
+EDGE,partition_rate,apap_distribution,liver,hr^-1,Edge attribute; SCHEMA_ONLY; distribution uses distributes_to k_p2l/k_l2p
+EDGE,blood_flow_rate,apap_distribution,liver,L/hr,Edge attribute; SCHEMA_ONLY
+EDGE,partition_rate,liver,apap_distribution,hr^-1,Edge attribute; SCHEMA_ONLY
+EDGE,blood_flow_rate,liver,apap_distribution,L/hr,Edge attribute; SCHEMA_ONLY
+ODE_STATE,index_0,A_gut_apap,,mg,ODE state idx=0; y0=dose_apap (1000 mg); gut compartment APAP mass
+ODE_STATE,index_1,A_plasma_apap,,mg,ODE state idx=1; y0=0; plasma APAP mass; drives C_p for parent metrics
+ODE_STATE,index_2,A_liver_apap,,mg,ODE state idx=2; y0=0; hepatic APAP mass; CYP/UGT/SULT substrate pool
+ODE_STATE,index_3,A_napqi,,mg,ODE state idx=3; y0=0; reactive metabolite; GST conjugation + GSH-gated necrosis source
+ODE_STATE,index_4,A_gsh,,mg,ODE state idx=4; y0=3000; endogenous GSH pool; maps to glutathione node; excluded from drug-mass invariant
+ODE_STATE,index_5,A_gut_caffeine,,mg,ODE state idx=5; y0=dose_caff (200 mg); gut compartment caffeine mass
+ODE_STATE,index_6,A_plasma_caffeine,,mg,ODE state idx=6; y0=0; plasma caffeine mass; DDI inhibitor pool (CYP1A2)
+ODE_STATE,index_7,A_liver_caffeine,,mg,ODE state idx=7; y0=0; hepatic caffeine mass; drives competitive Ki term
+ODE_STATE,index_8,A_paraxanthine,,mg,ODE state idx=8; y0=0; major caffeine metabolite; renal clearance → A_urine_sink
+ODE_STATE,index_9,A_liver_apap_gluc,,mg,ODE state idx=9; y0=0; APAP glucuronide mass; maps to metabolite node; k_clear=0.5
+ODE_STATE,index_10,A_liver_apap_sulf,,mg,ODE state idx=10; y0=0; APAP sulfate mass; maps to metabolite node; k_clear=0.5
+ODE_STATE,index_11,A_liver_theobromine,,mg,ODE state idx=11; y0=0; caffeine N1-demethylation product; k_clear=0.2
+ODE_STATE,index_12,A_liver_theophylline,,mg,ODE state idx=12; y0=0; caffeine N7-demethylation product; k_clear=0.2
+ODE_STATE,index_13,A_necrosis,,mg,ODE state idx=13; y0=0; covalently bound NAPQI / liver injury sink; NO PyG node (ODE-only)
+ODE_STATE,index_14,A_urine_sink,,mg,ODE state idx=14; y0=0; renally excreted + GSH-conjugate mass accumulator; maps to urine_sink compartment
+ODE_PARAMETER,k_tox,,,hr^-1,Hardcoded in MichaelisMentenODE; default=0.5; max NAPQI→necrosis rate when GSH exhausted
+ODE_PARAMETER,COSUB_GATE_MG,,,mg,Hardcoded in gnn_ode.py; default=50; GSH half-max for conjugation gate AND necrosis gating
+ODE_PARAMETER,k_syn_gsh,,,hr^-1,Read from glutathione node synthesis_rate (=0.1); dA_gsh/dt += k_syn*(baseline-A_gsh)
+ODE_PARAMETER,gsh_baseline_mg,,,mg,Read from glutathione baseline_homeostatic_pool_glut (=3000)
+ODE_PARAMETER,KCAT_PER_MIN_TO_PER_HR,,,×60,Unit conversion; graph Kcat (min^-1) → ODE (hr^-1)
+ODE_PARAMETER,MPPGL_MG_PER_G,,,mg/g,IVIVE constant; microsomal protein recovery factor
+ODE_PARAMETER,LIVER_WEIGHT_G,,,g,IVIVE constant; liver mass for enzyme scale-up
+ODE_PARAMETER,PMOL_TO_UMOL,,,umol/pmol,IVIVE unit conversion
+ODE_PARAMETER,UM_PER_MG_PER_L,,,μM·L/mg,Concentration conversion: C[μM] = A[mg]/MW/V[L] × 1000
+ODE_PARAMETER,NG_PER_MG_PER_L,,,ng/mL per mg/L,Reporting conversion for trajectory_to_curves
+ODE_MAP,DRUG_GUT_STATE,acetaminophen,A_gut_apap,,Hand-maintained species→state bridge in gnn_ode.py
+ODE_MAP,DRUG_GUT_STATE,caffeine,A_gut_caffeine,,Hand-maintained species→state bridge
+ODE_MAP,DRUG_PLASMA_STATE,acetaminophen,A_plasma_apap,,Hand-maintained species→state bridge
+ODE_MAP,DRUG_PLASMA_STATE,caffeine,A_plasma_caffeine,,Hand-maintained species→state bridge
+ODE_MAP,SUBSTRATE_STATE,acetaminophen,A_liver_apap,,Liver pool drives C/Km for APAP metabolism
+ODE_MAP,SUBSTRATE_STATE,caffeine,A_liver_caffeine,,Liver pool drives C/Km for caffeine demethylation
+ODE_MAP,SUBSTRATE_STATE,NAPQI,A_napqi,,NAPQI substrate for GSH conjugation
+ODE_MAP,PRODUCT_STATE,NAPQI,A_napqi,,CYP oxidation product
+ODE_MAP,PRODUCT_STATE,paraxanthine,A_paraxanthine,,Caffeine demethylation product
+ODE_MAP,PRODUCT_STATE,acetaminophen_glucuronide,A_liver_apap_gluc,,UGT conjugate product
+ODE_MAP,PRODUCT_STATE,acetaminophen_sulfate,A_liver_apap_sulf,,SULT conjugate product
+ODE_MAP,PRODUCT_STATE,theobromine,A_liver_theobromine,,Caffeine N1-demethylation product
+ODE_MAP,PRODUCT_STATE,theophylline,A_liver_theophylline,,Caffeine N7-demethylation product
+ODE_MAP,PRODUCT_STATE,NAPQI_glutathione,A_urine_sink,,GSH conjugate mass routed directly to urine sink (parent-equivalent mg)
+ODE_MAP,COSUBSTRATE_STATE,glutathione,A_gsh,,GSH co-substrate for GST conjugation; gate = A_gsh/(A_gsh+COSUB_GATE_MG)
+ODE_MAP,NECROSIS_FLUX,A_napqi,A_necrosis,,necrosis_flux = k_tox × A_napqi × (1 - gsh_avail); gsh_avail = A_gsh/(A_gsh+COSUB_GATE_MG)
