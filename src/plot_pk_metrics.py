@@ -68,7 +68,7 @@ def main() -> None:
 
     plot_pk_metrics(t, apap, caff, args.output, show=args.show)
 
-    print(f"\nTerminal-phase PK parameters (last 30% of time window, patient {weight:.1f} kg):")
+    print(f"\nTerminal-phase PK parameters (post-Tmax log-linear fit, patient {weight:.1f} kg):")
     for name, m in [("APAP", apap), ("Caffeine", caff)]:
         t_half = m["t_half_terminal_h"].item()
         vd_l = m["vd_terminal_L"].item()

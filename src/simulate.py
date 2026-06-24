@@ -20,12 +20,14 @@ def run_simulation(
     step_size: float = 0.025,
     use_gnn_factors: bool = False,
     checkpoint: Path | str = DEFAULT_CHECKPOINT,
+    dose_overrides: dict[str, float] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, HeteroData]:
-    """Integrate PK ODE; return ``(t, traj, data)``. traj ``[T, 15]`` mg, t in hr.
+    """Integrate PK ODE; return ``(t, traj, data)``. traj ``[T, S]`` mg, t in hr.
 
     With ``use_gnn_factors=True``, loads ``checkpoint`` before predicting f_GNN.
+    ``dose_overrides`` (mg, keyed by drug name) rewrites administration doses.
     """
-    data = build_dummy_graph()
+    data = build_dummy_graph(dose_overrides=dose_overrides)
     t = torch.linspace(0.0, hours, steps)
     model = GNNODEModel(data, hidden_channels=32, heads=2)
 
