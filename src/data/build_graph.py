@@ -1,3 +1,4 @@
+import copy
 import torch
 from collections import defaultdict
 from torch_geometric.data import HeteroData
@@ -107,6 +108,7 @@ COMPARTMENT_NODES = [
     "plasma",
     "liver",
     "urine_sink",
+    "peripheral",
 ]
 
 ENZYME_NODES = [
@@ -236,10 +238,11 @@ EDGE_FEATURES = {
         "absorption_rate_ka",
     ],
 
-    # Plasma↔liver transfer rates (hr⁻¹), derived from target Vd and patient weight.
+    # Plasma↔compartment transfer rates (hr⁻¹): liver = hepatic blood flow,
+    # peripheral = deep Vd sink derived from target Vd and patient weight.
     ("drug", "distributes_to", "compartment"): [
-        "k_p2l",
-        "k_l2p",
+        "k_p2c",
+        "k_c2p",
     ],
 
     ("patient", "expresses", "enzyme"): [
@@ -328,7 +331,8 @@ EDGES = {
     ],
 
     ("drug", "distributes_to", "compartment"): [
-        ("acetaminophen", "liver"), ("caffeine", "liver"),
+        ("acetaminophen", "liver"), ("acetaminophen", "peripheral"),
+        ("caffeine", "liver"), ("caffeine", "peripheral"),
     ],
 
     ("compartment", "contains", "enzyme"): [("liver", e) for e in ENZYME_NODES],
@@ -446,6 +450,8 @@ NODE_VALUES = {
         "plasma":     {"volume_L": 3.0},
         "liver":      {"volume_L": 1.5},
         "urine_sink": {"volume_L": 1.0},
+        # Inert deep Vd sink; tracked as mass only (concentration never computed).
+        "peripheral": {"volume_L": 60.0},
     },
     "endogenous_molecule": {
         # Hepatic glutathione pool (mg). ~10 umol/g liver * 1500 g * 307 mg/mmol.
@@ -458,37 +464,57 @@ NODE_VALUES = {
         },
     },
 }
-# k_p2l from target Vd: at pseudo-equilibrium, Vd_app ≈ V_plasma * (1 + k_p2l / k_l2p).
 PATIENT_WEIGHT_KG = NODE_VALUES["patient"]["patient_0"]["weight_kg"]
 V_PLASMA_L = NODE_VALUES["compartment"]["plasma"]["volume_L"]
-K_L2P_FIXED = 1.0
+V_LIVER_L = NODE_VALUES["compartment"]["liver"]["volume_L"]
+
+# Liver is a flow-limited physiological compartment (NOT the Vd sink): plasma↔liver
+# rates come from hepatic blood flow and a liver:plasma partition ~1, so liver
+# concentration tracks plasma and no longer inflates metabolic clearance.
+HEPATIC_BLOOD_FLOW_L_HR = 90.0   # ~1.5 L/min
+LIVER_PLASMA_PARTITION = 1.0
+K_P2L = HEPATIC_BLOOD_FLOW_L_HR / V_PLASMA_L
+K_L2P = HEPATIC_BLOOD_FLOW_L_HR / (V_LIVER_L * LIVER_PLASMA_PARTITION)
+LIVER_AMOUNT_RATIO = K_P2L / K_L2P   # A_liver / A_plasma at pseudo-equilibrium
+
+# Peripheral compartment is the inert deep Vd sink. Its plasma↔peripheral ratio
+# absorbs whatever the target Vd requires beyond plasma + liver:
+#   Vd ≈ V_plasma * (1 + A_liver/A_plasma + A_periph/A_plasma).
+K_PERIPH2P_FIXED = 1.0
 
 
-def _k_p2l_for_drug(drug_name: str) -> float:
-    """Plasma->liver rate (hr⁻¹) reproducing the drug's weight-scaled Vd target."""
+def _k_p2periph_for_drug(drug_name: str) -> float:
+    """Plasma->peripheral rate (hr⁻¹) so plasma+liver+peripheral reproduce target Vd."""
     vd_target_L = NODE_VALUES["drug"][drug_name]["target_vd_L_kg"] * PATIENT_WEIGHT_KG
-    return (vd_target_L / V_PLASMA_L - 1.0) * K_L2P_FIXED
+    periph_ratio = vd_target_L / V_PLASMA_L - 1.0 - LIVER_AMOUNT_RATIO
+    return max(periph_ratio, 0.0) * K_PERIPH2P_FIXED
 
 
+# Per drug: liver (blood-flow) and peripheral (Vd-sink) transfer rate pairs.
 DISTRIBUTION_RATES = {
-    name: {"k_p2l": _k_p2l_for_drug(name), "k_l2p": K_L2P_FIXED}
+    name: {
+        "liver": {"k_p2c": K_P2L, "k_c2p": K_L2P},
+        "peripheral": {"k_p2c": _k_p2periph_for_drug(name), "k_c2p": K_PERIPH2P_FIXED},
+    }
     for name in ("acetaminophen", "caffeine")
 }
 
 # Catalytic edge units: Km/Ki (μM), Kcat (min⁻¹), ka (hr⁻¹).
 EDGE_VALUES = {
     ("drug", "distributes_to", "compartment"): {
-        ("acetaminophen", "liver"): DISTRIBUTION_RATES["acetaminophen"],
-        ("caffeine", "liver"):      DISTRIBUTION_RATES["caffeine"],
+        ("acetaminophen", "liver"):      DISTRIBUTION_RATES["acetaminophen"]["liver"],
+        ("acetaminophen", "peripheral"): DISTRIBUTION_RATES["acetaminophen"]["peripheral"],
+        ("caffeine", "liver"):           DISTRIBUTION_RATES["caffeine"]["liver"],
+        ("caffeine", "peripheral"):      DISTRIBUTION_RATES["caffeine"]["peripheral"],
     },
     ("patient", "receives", "administration_event"): {
         ("patient_0", "admin_event_0"): {
-            "creatinine": 1.0, "ALT": 25.0, "AST": 22.0,
+            "creatinine": 1. , "ALT": 25.0, "AST": 22.0,
             "bilirubin": 0.8, "albumin": 4.2,
         },
     },
     ("administration_event", "releases", "drug"): {
-        ("admin_event_0", "acetaminophen"): {"dose_amount_mg": 5000.0},
+        ("admin_event_0", "acetaminophen"): {"dose_amount_mg": 1000.0},
         ("admin_event_0", "caffeine"):      {"dose_amount_mg": 200.0},
     },
     ("endogenous_molecule", "depleted_by", "reaction"): {
@@ -498,16 +524,18 @@ EDGE_VALUES = {
         },
     },
     ("enzyme", "catalyzes", "reaction"): {
-        ("CYP2E1", "rxn_cyp_oxidation"):          {"Km": 1290.0, "Ki": 1e6, "Kcat": 4.2},
-        ("CYP3A4", "rxn_cyp_oxidation"):          {"Km": 6890.0, "Ki": 1e6, "Kcat": 2.1},
+        # Kcat (min⁻¹) IVIVE-calibrated so whole-body clearance matches clinical t½
+        # under the flow-limited liver (Kp~1); ~10x APAP, ~4x caffeine vs raw in-vitro.
+        ("CYP2E1", "rxn_cyp_oxidation"):          {"Km": 1290.0, "Ki": 1e6, "Kcat": 42.0},
+        ("CYP3A4", "rxn_cyp_oxidation"):          {"Km": 6890.0, "Ki": 1e6, "Kcat": 21.0},
         ("CYP1A2", "rxn_cyp_oxidation"):          {"Km": 2700.0, "Ki": 1e6, "Kcat": 1.8},
-        ("UGT1A1", "rxn_glucuronidation"):        {"Km": 3500.0, "Ki": 1e6, "Kcat": 5.0},
-        ("SULT1A1", "rxn_sulfation"):             {"Km": 250.0,  "Ki": 1e6, "Kcat": 3.3},
+        ("UGT1A1", "rxn_glucuronidation"):        {"Km": 3500.0, "Ki": 1e6, "Kcat": 50.0},
+        ("SULT1A1", "rxn_sulfation"):             {"Km": 250.0,  "Ki": 1e6, "Kcat": 33.0},
         ("GST", "rxn_gsh_conjugation"):           {"Km": 900.0,  "Ki": 1e6, "Kcat": 6.1},
         # Caffeine demethylation Kcat split ~ 84:12:4 (paraxanthine:theobromine:theophylline).
-        ("CYP1A2", "rxn_caff_n3_demethylation"): {"Km": 500.0,  "Ki": 1e6, "Kcat": 2.9},
-        ("CYP1A2", "rxn_caff_n1_demethylation"): {"Km": 500.0,  "Ki": 1e6, "Kcat": 0.41},
-        ("CYP1A2", "rxn_caff_n7_demethylation"): {"Km": 500.0,  "Ki": 1e6, "Kcat": 0.14},
+        ("CYP1A2", "rxn_caff_n3_demethylation"): {"Km": 500.0,  "Ki": 1e6, "Kcat": 16.4},
+        ("CYP1A2", "rxn_caff_n1_demethylation"): {"Km": 500.0,  "Ki": 1e6, "Kcat": 2.2},
+        ("CYP1A2", "rxn_caff_n7_demethylation"): {"Km": 500.0,  "Ki": 1e6, "Kcat": 0.82},
     },
     ("drug", "competitively_inhibits", "enzyme"): {
         ("caffeine", "CYP1A2"): {"Ki": 150.0},  # μM
@@ -604,7 +632,18 @@ def validate_catalytic_edge_values(edge_values=EDGE_VALUES) -> None:
             if key in rec:
                 assert torch.isfinite(torch.tensor(float(rec[key]))), f"{pair}: {key} must be finite"
 
-def build_dummy_graph(node_values=NODE_VALUES, edge_values=EDGE_VALUES) -> HeteroData:
+def build_dummy_graph(
+    node_values=NODE_VALUES,
+    edge_values=EDGE_VALUES,
+    dose_overrides: dict[str, float] | None = None,
+) -> HeteroData:
+    """Assemble the static PK graph. ``dose_overrides`` (mg, keyed by drug name)
+    rewrites administration doses without mutating module-level defaults."""
+    if dose_overrides:
+        edge_values = copy.deepcopy(edge_values)
+        rel = ("administration_event", "releases", "drug")
+        for drug_name, mg in dose_overrides.items():
+            edge_values[rel][("admin_event_0", drug_name)]["dose_amount_mg"] = float(mg)
     validate_catalytic_edge_values(edge_values)
     data = HeteroData()
     for nt in node_types:

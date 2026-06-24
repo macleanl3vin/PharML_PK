@@ -14,23 +14,25 @@ from src.models.gnn_ode import STATE_IDX
 
 DrugKey = Literal["apap", "caffeine"]
 
-_DRUG_INDICES: dict[DrugKey, tuple[int, int, int]] = {
+_DRUG_INDICES: dict[DrugKey, tuple[int, int, int, int]] = {
     "apap": (
         STATE_IDX["A_gut_apap"],
         STATE_IDX["A_plasma_apap"],
         STATE_IDX["A_liver_apap"],
+        STATE_IDX["A_periph_apap"],
     ),
     "caffeine": (
         STATE_IDX["A_gut_caffeine"],
         STATE_IDX["A_plasma_caffeine"],
         STATE_IDX["A_liver_caffeine"],
+        STATE_IDX["A_periph_caffeine"],
     ),
 }
 
 LN2 = 0.6931471805599453
 
 
-def _resolve_drug(drug: DrugKey) -> tuple[int, int, int]:
+def _resolve_drug(drug: DrugKey) -> tuple[int, int, int, int]:
     return _DRUG_INDICES[drug]
 
 
@@ -47,22 +49,27 @@ def _central_derivative(t: Tensor, y: Tensor) -> Tensor:
 
 
 def parent_amounts(traj: Tensor, drug: DrugKey) -> dict[str, Tensor]:
-    """Return gut, plasma, liver, sys, track — each [T], in mg."""
-    i_gut, i_plasma, i_liver = _resolve_drug(drug)
+    """Return gut, plasma, liver, periph, sys, track — each [T], in mg.
 
-    if traj.ndim != 2 or traj.size(-1) < 9:
-        raise ValueError(f"traj must be [T, >=9]; got {tuple(traj.shape)}")
+    Systemic = plasma + liver + peripheral; tracked = systemic + gut.
+    """
+    i_gut, i_plasma, i_liver, i_periph = _resolve_drug(drug)
+
+    if traj.ndim != 2 or traj.size(-1) <= i_periph:
+        raise ValueError(f"traj must be [T, >{i_periph}]; got {tuple(traj.shape)}")
 
     gut = traj[:, i_gut].clamp(min=0.0)
     plasma = traj[:, i_plasma].clamp(min=0.0)
     liver = traj[:, i_liver].clamp(min=0.0)
+    periph = traj[:, i_periph].clamp(min=0.0)
 
     return {
         "gut": gut,
         "plasma": plasma,
         "liver": liver,
-        "sys": plasma + liver,
-        "track": gut + plasma + liver,
+        "periph": periph,
+        "sys": plasma + liver + periph,
+        "track": gut + plasma + liver + periph,
     }
 
 
@@ -95,14 +102,15 @@ def vd_sys(
     t: Tensor,
     A_plasma: Tensor,
     A_liver: Tensor,
+    A_periph: Tensor,
     v_plasma_L: Tensor | float,
     *,
     c_min: float = 1e-6,
 ) -> Tensor:
-    """Apparent systemic Vd(t) = (A_plasma + A_liver) / C_p [L]. Systemic = plasma + liver."""
+    """Apparent systemic Vd(t) = (A_plasma + A_liver + A_periph) / C_p [L]."""
     del t
     C_p, valid = _plasma_conc_with_floor(A_plasma, v_plasma_L, c_min=c_min)
-    A_sys = A_plasma.clamp(min=0.0) + A_liver.clamp(min=0.0)
+    A_sys = A_plasma.clamp(min=0.0) + A_liver.clamp(min=0.0) + A_periph.clamp(min=0.0)
     vd = A_sys / C_p
     return torch.where(valid, vd, torch.full_like(vd, float("nan")))
 
@@ -112,17 +120,19 @@ def vd_track(
     A_gut: Tensor,
     A_plasma: Tensor,
     A_liver: Tensor,
+    A_periph: Tensor,
     v_plasma_L: Tensor | float,
     *,
     c_min: float = 1e-6,
 ) -> Tensor:
-    """Apparent total tracked Vd(t) = (A_gut + A_plasma + A_liver) / C_p [L]."""
+    """Apparent total tracked Vd(t) = (A_gut + A_plasma + A_liver + A_periph) / C_p [L]."""
     del t
     C_p, valid = _plasma_conc_with_floor(A_plasma, v_plasma_L, c_min=c_min)
     A_track = (
         A_gut.clamp(min=0.0)
         + A_plasma.clamp(min=0.0)
         + A_liver.clamp(min=0.0)
+        + A_periph.clamp(min=0.0)
     )
     vd = A_track / C_p
     return torch.where(valid, vd, torch.full_like(vd, float("nan")))
@@ -163,60 +173,90 @@ def t_half_from_clearance(
     return torch.where(elim, LN2 * vd_sys_vals / CL_inst, t_half)
 
 
-def _terminal_window_mask(t: Tensor, terminal_fraction: float) -> Tensor:
-    """Boolean mask selecting the last `terminal_fraction` of the time span."""
-    if not 0.0 < terminal_fraction <= 1.0:
-        raise ValueError(f"terminal_fraction must be in (0, 1]; got {terminal_fraction}")
-    t_start = t.min()
-    t_end = t.max()
-    cutoff = t_end - (t_end - t_start) * terminal_fraction
-    return t >= cutoff
+def terminal_phase_mask(
+    t: Tensor,
+    C_p_mg_L: Tensor,
+    *,
+    frac_low: float = 0.05,
+    frac_high: float = 0.80,
+    min_points: int = 3,
+) -> Tensor:
+    """Boolean mask of the post-Tmax log-linear elimination phase.
+
+    Keeps points strictly after Tmax with ``frac_low*Cmax <= C_p <= frac_high*Cmax``
+    (the upper bound drops the distribution shoulder, the lower bound drops the
+    quantitation-limit tail). The upper bound is relaxed if too few points survive.
+    Returns an all-False mask when no usable terminal phase exists (e.g. the drug
+    is fully cleared), so callers degrade to NaN instead of fitting noise.
+    """
+    n = C_p_mg_L.numel()
+    false_mask = torch.zeros(n, dtype=torch.bool, device=C_p_mg_L.device)
+    if n < min_points:
+        return false_mask
+
+    cmax, tmax_idx = torch.max(C_p_mg_L, dim=0)
+    if not torch.isfinite(cmax) or cmax <= 0:
+        return false_mask
+
+    after_peak = torch.arange(n, device=C_p_mg_L.device) > tmax_idx
+    positive = C_p_mg_L > 0
+    lower = frac_low * cmax
+    upper = frac_high * cmax
+
+    mask = after_peak & positive & (C_p_mg_L >= lower) & (C_p_mg_L <= upper)
+    if int(mask.sum()) < min_points:  # relax the distribution-phase upper bound
+        mask = after_peak & positive & (C_p_mg_L >= lower)
+    if int(mask.sum()) < min_points:
+        return false_mask
+    return mask
 
 
 def terminal_half_life(
     t: Tensor,
     C_p_mg_L: Tensor,
     *,
-    terminal_fraction: float = 0.30,
-    c_min: float = 1e-6,
+    frac_low: float = 0.05,
+    frac_high: float = 0.80,
+    min_points: int = 3,
 ) -> Tensor:
-    """Terminal t½ via log-linear regression of ln(C_p) over the last 30% of t."""
-    window = _terminal_window_mask(t, terminal_fraction)
-    valid = window & (C_p_mg_L >= c_min)
-
-    t_w = t[valid]
-    lnC_w = torch.log(C_p_mg_L[valid].clamp(min=c_min))
-
+    """Terminal t½ via log-linear regression over the post-Tmax elimination phase."""
     nan = torch.tensor(float("nan"), dtype=C_p_mg_L.dtype, device=C_p_mg_L.device)
-    if t_w.numel() < 2:
+    mask = terminal_phase_mask(
+        t, C_p_mg_L, frac_low=frac_low, frac_high=frac_high, min_points=min_points
+    )
+    if int(mask.sum()) < min_points:
         return nan
 
-    t_mean = t_w.mean()
-    lnC_mean = lnC_w.mean()
-    dt = t_w - t_mean
+    t_w = t[mask]
+    lnC_w = torch.log(C_p_mg_L[mask])
+
+    dt = t_w - t_w.mean()
     denom = (dt * dt).sum()
     if denom <= 0:
         return nan
 
-    slope = (dt * (lnC_w - lnC_mean)).sum() / denom
-    k_elim = -slope
-    if k_elim <= 0:
+    slope = (dt * (lnC_w - lnC_w.mean())).sum() / denom
+    if slope >= 0:  # flat or rising terminal phase is not an elimination slope
         return nan
-    return LN2 / k_elim
+    return LN2 / (-slope)
 
 
 def terminal_vd_sys(
     vd_sys_vals: Tensor,
     t: Tensor,
+    C_p_mg_L: Tensor,
     *,
-    terminal_fraction: float = 0.30,
+    frac_low: float = 0.05,
+    frac_high: float = 0.80,
+    min_points: int = 3,
 ) -> Tensor:
-    """Steady-state Vd_sys = median Vd over the terminal window."""
-    window = _terminal_window_mask(t, terminal_fraction)
-    vd_w = vd_sys_vals[window]
-    vd_w = vd_w[torch.isfinite(vd_w)]
-
+    """Steady-state Vd_sys = median Vd over the post-Tmax elimination phase."""
     nan = torch.tensor(float("nan"), dtype=vd_sys_vals.dtype, device=vd_sys_vals.device)
+    mask = terminal_phase_mask(
+        t, C_p_mg_L, frac_low=frac_low, frac_high=frac_high, min_points=min_points
+    )
+    vd_w = vd_sys_vals[mask]
+    vd_w = vd_w[torch.isfinite(vd_w)]
     if vd_w.numel() == 0:
         return nan
     return torch.median(vd_w)
@@ -234,16 +274,19 @@ def pk_metrics_for_drug(
     """Parent PK metrics; optional ``weight_kg`` adds L/kg-normalized Vd."""
     amts = parent_amounts(traj, drug)
     C_p = plasma_concentration_mg_L(amts["plasma"], v_plasma_L)
-    vd_s = vd_sys(t, amts["plasma"], amts["liver"], v_plasma_L, c_min=c_min)
-    vd_t = vd_track(t, amts["gut"], amts["plasma"], amts["liver"], v_plasma_L, c_min=c_min)
+    vd_s = vd_sys(t, amts["plasma"], amts["liver"], amts["periph"], v_plasma_L, c_min=c_min)
+    vd_t = vd_track(t, amts["gut"], amts["plasma"], amts["liver"], amts["periph"], v_plasma_L, c_min=c_min)
     t_half = t_half_instantaneous(t, C_p, c_min=c_min)
     t_half_cl = t_half_from_clearance(t, amts["sys"], C_p, vd_s, c_min=c_min)
-    t_half_terminal = terminal_half_life(t, C_p, c_min=c_min)
-    vd_terminal = terminal_vd_sys(vd_s, t)
+    t_half_terminal = terminal_half_life(t, C_p)
+    vd_terminal = terminal_vd_sys(vd_s, t, C_p)
+    cmax, tmax_idx = torch.max(C_p, dim=0)
     metrics = {
         **amts,
         "C_p_mg_L": C_p,
         "C_p_ng_mL": C_p * 1000.0,
+        "cmax_ng_mL": cmax * 1000.0,
+        "tmax_h": t[tmax_idx],
         "vd_sys_L": vd_s,
         "vd_track_L": vd_t,
         "t_half_h": t_half,

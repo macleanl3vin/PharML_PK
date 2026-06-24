@@ -16,24 +16,36 @@ from torchdiffeq import odeint
 
 from src.data.build_graph import NODE_NAMES, build_dummy_graph
 
-# ODE state: amounts (mg). Indices 0–12 stable for downstream metrics code.
-# Sinks A_necrosis and A_urine_sink close mass balance for bound NAPQI and renal loss.
+# ODE state: amounts (mg). Indices 0–14 stable for downstream metrics code.
+# Peripheral states (15–16) are the inert deep-Vd sink, decoupled from the liver.
+# Sinks A_napqi_adduct_sink and A_urine_sink close mass balance for covalent-bound
+# NAPQI and renal loss.
 STATE_NAMES = [
     "A_gut_apap", "A_plasma_apap", "A_liver_apap", "A_napqi", "A_gsh",
     "A_gut_caffeine", "A_plasma_caffeine", "A_liver_caffeine", "A_paraxanthine",
     "A_liver_apap_gluc", "A_liver_apap_sulf", "A_liver_theobromine", "A_liver_theophylline",
-    "A_necrosis", "A_urine_sink",
+    "A_napqi_adduct_sink", "A_urine_sink",
+    "A_periph_apap", "A_periph_caffeine",
 ]
 STATE_IDX = {name: i for i, name in enumerate(STATE_NAMES)}
 
 # Hand-maintained species → ODE index map (graph topology supplies the rest).
 DRUG_GUT_STATE = {"acetaminophen": STATE_IDX["A_gut_apap"], "caffeine": STATE_IDX["A_gut_caffeine"]}
 DRUG_PLASMA_STATE = {"acetaminophen": STATE_IDX["A_plasma_apap"], "caffeine": STATE_IDX["A_plasma_caffeine"]}
+# Inert peripheral pool: holds the deep Vd, never metabolized.
+PERIPH_STATE = {"acetaminophen": STATE_IDX["A_periph_apap"], "caffeine": STATE_IDX["A_periph_caffeine"]}
 # Liver pool drives C/Km in enzymatic reactions.
 SUBSTRATE_STATE = {
     "acetaminophen": STATE_IDX["A_liver_apap"],
     "caffeine": STATE_IDX["A_liver_caffeine"],
     "NAPQI": STATE_IDX["A_napqi"],
+}
+# Plasma↔compartment distribution targets, keyed by (drug, compartment_name).
+DIST_TARGET_STATE = {
+    ("acetaminophen", "liver"): STATE_IDX["A_liver_apap"],
+    ("acetaminophen", "peripheral"): STATE_IDX["A_periph_apap"],
+    ("caffeine", "liver"): STATE_IDX["A_liver_caffeine"],
+    ("caffeine", "peripheral"): STATE_IDX["A_periph_caffeine"],
 }
 # Metabolite products with dedicated ODE states; NAPQI_glutathione → urine sink.
 PRODUCT_STATE = {
@@ -171,18 +183,21 @@ def build_ode_index(data: HeteroData) -> dict:
             abs_plasma.append(DRUG_PLASMA_STATE[name])
             abs_ka.append(float(abs_ka_attr[k, 0]) if abs_ka_attr is not None else 1.0)
 
-    # k_p2l, k_l2p from distributes_to edges (Vd target × weight in build_graph).
+    # Plasma↔compartment transfer (k_p2c, k_c2p) from distributes_to edges.
+    # Liver = flow-limited hepatic exchange; peripheral = inert deep Vd sink.
+    comp_names = NODE_NAMES["compartment"]
     dist_et = ("drug", "distributes_to", "compartment")
-    dist_p_idx, dist_l_idx, dist_k_p2l, dist_k_l2p = [], [], [], []
+    dist_p_idx, dist_t_idx, dist_k_p2c, dist_k_c2p = [], [], [], []
     if dist_et in data.edge_types and "edge_attr" in data[dist_et]:
         dist_attr = data[dist_et].edge_attr
-        for k, (d, _comp) in enumerate(data[dist_et].edge_index.t().tolist()):
+        for k, (d, comp) in enumerate(data[dist_et].edge_index.t().tolist()):
             name = drug_names[d]
-            if name in DRUG_PLASMA_STATE and name in SUBSTRATE_STATE:
+            key = (name, comp_names[comp])
+            if name in DRUG_PLASMA_STATE and key in DIST_TARGET_STATE:
                 dist_p_idx.append(DRUG_PLASMA_STATE[name])
-                dist_l_idx.append(SUBSTRATE_STATE[name])
-                dist_k_p2l.append(float(dist_attr[k, 0]))
-                dist_k_l2p.append(float(dist_attr[k, 1]))
+                dist_t_idx.append(DIST_TARGET_STATE[key])
+                dist_k_p2c.append(float(dist_attr[k, 0]))
+                dist_k_c2p.append(float(dist_attr[k, 1]))
 
     # Competitive inhibition: liver C/Ki added to shared enzyme denominator.
     inhib_et = ("drug", "competitively_inhibits", "enzyme")
@@ -237,9 +252,9 @@ def build_ode_index(data: HeteroData) -> dict:
         "abs_plasma": L(abs_plasma),
         "abs_ka": torch.tensor(abs_ka, dtype=torch.float),
         "dist_p_idx": L(dist_p_idx),
-        "dist_l_idx": L(dist_l_idx),
-        "dist_k_p2l": torch.tensor(dist_k_p2l, dtype=torch.float),
-        "dist_k_l2p": torch.tensor(dist_k_l2p, dtype=torch.float),
+        "dist_t_idx": L(dist_t_idx),
+        "dist_k_p2c": torch.tensor(dist_k_p2c, dtype=torch.float),
+        "dist_k_c2p": torch.tensor(dist_k_c2p, dtype=torch.float),
         "inhib_state": L(inhib_state),
         "inhib_enz_local": L(inhib_enz_local),
         "inhib_ki": torch.tensor(inhib_ki, dtype=torch.float),
@@ -247,7 +262,8 @@ def build_ode_index(data: HeteroData) -> dict:
         "clear_state": L(clear_state),
         "clear_k": torch.tensor(clear_k, dtype=torch.float),
         "urine_state": STATE_IDX["A_urine_sink"],
-        "necrosis_state": STATE_IDX["A_napqi"],
+        "napqi_state": STATE_IDX["A_napqi"],
+        "adduct_sink_state": STATE_IDX["A_napqi_adduct_sink"],
         "gsh_state": STATE_IDX["A_gsh"],
         "gsh_baseline_mg": gsh_baseline_mg,
         "k_syn_gsh": k_syn_gsh,
@@ -286,7 +302,7 @@ class MichaelisMentenODE(nn.Module):
 
     Vmax_edge = Kcat × [E] × f_GNN; shared enzyme denominators couple DDIs.
     Absorption, distribution, renal clearance, and GSH regeneration are
-    graph-derived; k_tox (NAPQI → necrosis) is the sole hardcoded rate.
+    graph-derived; k_tox (NAPQI → covalent adduct sink) is the sole hardcoded rate.
     """
 
     def __init__(self, factors: torch.Tensor, idx: dict, k_tox: float = 0.5):
@@ -346,23 +362,24 @@ class MichaelisMentenODE(nn.Module):
             dydt = dydt.index_add(0, idx["abs_gut"], -abs_flux)
             dydt = dydt.index_add(0, idx["abs_plasma"], abs_flux)
 
+        # Plasma↔(liver, peripheral) transfer; duplicate plasma indices accumulate.
         p_idx = idx["dist_p_idx"]
-        l_idx = idx["dist_l_idx"]
-        k_p2l = idx["dist_k_p2l"].to(y.device)
-        k_l2p = idx["dist_k_l2p"].to(y.device)
-        dist_flux = k_p2l * y[p_idx] - k_l2p * y[l_idx]
+        t_idx = idx["dist_t_idx"]
+        k_p2c = idx["dist_k_p2c"].to(y.device)
+        k_c2p = idx["dist_k_c2p"].to(y.device)
+        dist_flux = k_p2c * y[p_idx] - k_c2p * y[t_idx]
         dydt = dydt.index_add(0, p_idx, -dist_flux)
-        dydt = dydt.index_add(0, l_idx, dist_flux)
+        dydt = dydt.index_add(0, t_idx, dist_flux)
 
         gsh_i = idx["gsh_state"]
         dydt[gsh_i] = dydt[gsh_i] + idx["k_syn_gsh"] * (idx["gsh_baseline_mg"] - y[gsh_i])
 
-        napqi_i = idx["necrosis_state"]
-
+        # Irreversible covalent binding of NAPQI when GSH is depleted → adduct sink.
+        napqi_i = idx["napqi_state"]
         gsh_avail = y[gsh_i] / (y[gsh_i] + COSUB_GATE_MG)
-        necrosis_flux = self.k_tox * y[napqi_i] * (1.0 - gsh_avail)
-        dydt[napqi_i] = dydt[napqi_i] - necrosis_flux
-        dydt[STATE_IDX["A_necrosis"]] = dydt[STATE_IDX["A_necrosis"]] + necrosis_flux
+        adduct_flux = self.k_tox * y[napqi_i] * (1.0 - gsh_avail)
+        dydt[napqi_i] = dydt[napqi_i] - adduct_flux
+        dydt[idx["adduct_sink_state"]] = dydt[idx["adduct_sink_state"]] + adduct_flux
 
         if idx["clear_state"].numel() > 0:
             clear_flux = idx["clear_k"] * y[idx["clear_state"]].clamp(min=0.0)
@@ -428,15 +445,11 @@ class GNNODEModel(nn.Module):
             for k, (_admin, d) in enumerate(data[dose_et].edge_index.t().tolist()):
                 dose_by_drug[drug_names[d]] = data[dose_et].edge_attr[k, 0].clamp(min=0.0)
         zero = torch.zeros(())
-        dose_apap = dose_by_drug.get("acetaminophen", zero)
-        dose_caff = dose_by_drug.get("caffeine", zero)
-        gsh0 = data["endogenous_molecule"].x_state[0, 0].abs()
-        return torch.stack([
-            dose_apap, zero, zero, zero, gsh0,
-            dose_caff, zero, zero, zero,
-            zero, zero, zero, zero,
-            zero, zero,
-        ])
+        y0 = torch.zeros(len(STATE_NAMES))
+        y0[STATE_IDX["A_gut_apap"]] = dose_by_drug.get("acetaminophen", zero)
+        y0[STATE_IDX["A_gut_caffeine"]] = dose_by_drug.get("caffeine", zero)
+        y0[STATE_IDX["A_gsh"]] = data["endogenous_molecule"].x_state[0, 0].abs()
+        return y0
 
     def build_ode(self, factors: torch.Tensor) -> MichaelisMentenODE:
         return MichaelisMentenODE(factors, self.ode_idx)
@@ -516,7 +529,7 @@ def main() -> None:
         print(f"sum(drug-derived states)   = {drug_mass:.4f} mg")
         print(f"mass-balance residual      = {residual:.3e} mg")
         print(f"A_urine_sink               = {float(final[STATE_IDX['A_urine_sink']]):.4f} mg")
-        print(f"A_necrosis                 = {float(final[STATE_IDX['A_necrosis']]):.4f} mg")
+        print(f"A_napqi_adduct_sink        = {float(final[STATE_IDX['A_napqi_adduct_sink']]):.4f} mg")
         assert residual < 1e-2, f"Mass balance violated: residual {residual:.3e} mg"
         print("Mass balance holds: drug-derived states conserve the administered dose.")
 
