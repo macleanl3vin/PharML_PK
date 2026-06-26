@@ -212,21 +212,52 @@ def build_ode_index(data: HeteroData) -> dict:
                 inhib_ki.append(max(float(inhib_attr[k, 0]), 1e-6))
                 inhib_mw.append(SPECIES_MW[name])
 
-    # Terminal metabolite renal clearance → urine sink.
-    clr_et = ("metabolite", "cleared_via", "reaction")
+    # Renal clearance → urine sink: metabolite products + unchanged parent (plasma mass).
     clear_state, clear_k = [], []
-    if clr_et in data.edge_types and "edge_attr" in data[clr_et]:
-        clr_attr = data[clr_et].edge_attr
-        for k, (m, _r) in enumerate(data[clr_et].edge_index.t().tolist()):
+    met_clr_et = ("metabolite", "cleared_via", "reaction")
+    if met_clr_et in data.edge_types and "edge_attr" in data[met_clr_et]:
+        clr_attr = data[met_clr_et].edge_attr
+        for k, (m, _r) in enumerate(data[met_clr_et].edge_index.t().tolist()):
             name = met_names[m]
             if name in PRODUCT_STATE:
                 clear_state.append(PRODUCT_STATE[name])
+                clear_k.append(float(clr_attr[k, 0]))
+    parent_clr_et = ("drug", "cleared_via", "reaction")
+    if parent_clr_et in data.edge_types and "edge_attr" in data[parent_clr_et]:
+        clr_attr = data[parent_clr_et].edge_attr
+        for k, (d, _r) in enumerate(data[parent_clr_et].edge_index.t().tolist()):
+            name = drug_names[d]
+            if name in DRUG_PLASMA_STATE:
+                clear_state.append(DRUG_PLASMA_STATE[name])
                 clear_k.append(float(clr_attr[k, 0]))
 
     # GSH regeneration parameters from endogenous_molecule.x_static.
     endo_static = data["endogenous_molecule"].x_static
     gsh_baseline_mg = float(endo_static[0, 0].abs())
     k_syn_gsh = float(endo_static[0, 1].abs())
+
+    enz_names = NODE_NAMES["enzyme"]
+    rxn_name_list = NODE_NAMES["reaction"]
+    cyp1a2_global = enz_names.index("CYP1A2")
+    cyp1a2_group = enz_group_of.get(cyp1a2_global, -1)
+    ki_apap_cyp1a2, ki_caff_cyp1a2 = 10.0, 150.0
+    if inhib_et in data.edge_types and "edge_attr" in data[inhib_et]:
+        inhib_attr_dbg = data[inhib_et].edge_attr
+        for k, (d, e) in enumerate(data[inhib_et].edge_index.t().tolist()):
+            if enz_names[e] != "CYP1A2":
+                continue
+            if drug_names[d] == "acetaminophen":
+                ki_apap_cyp1a2 = max(float(inhib_attr_dbg[k, 0]), 1e-6)
+            elif drug_names[d] == "caffeine":
+                ki_caff_cyp1a2 = max(float(inhib_attr_dbg[k, 0]), 1e-6)
+    km_apap_cyp1a2, km_caff_demeth = 2700.0, 500.0
+    for k, (e, r) in enumerate(data[cat_et].edge_index.t().tolist()):
+        if enz_names[e] != "CYP1A2":
+            continue
+        if rxn_name_list[r] == "rxn_cyp_oxidation":
+            km_apap_cyp1a2 = max(float(cat_attr[k, 0]), 1e-6)
+        elif rxn_name_list[r] == "rxn_caff_n3_demethylation":
+            km_caff_demeth = max(float(cat_attr[k, 0]), 1e-6)
 
     L = lambda x: torch.tensor(x, dtype=torch.long)
     return {
@@ -267,6 +298,11 @@ def build_ode_index(data: HeteroData) -> dict:
         "gsh_state": STATE_IDX["A_gsh"],
         "gsh_baseline_mg": gsh_baseline_mg,
         "k_syn_gsh": k_syn_gsh,
+        "cyp1a2_group": cyp1a2_group,
+        "ki_apap_cyp1a2": ki_apap_cyp1a2,
+        "ki_caff_cyp1a2": ki_caff_cyp1a2,
+        "km_apap_cyp1a2": km_apap_cyp1a2,
+        "km_caff_demeth": km_caff_demeth,
     }
 
 
@@ -305,11 +341,18 @@ class MichaelisMentenODE(nn.Module):
     graph-derived; k_tox (NAPQI → covalent adduct sink) is the sole hardcoded rate.
     """
 
-    def __init__(self, factors: torch.Tensor, idx: dict, k_tox: float = 0.5):
+    def __init__(
+        self,
+        factors: torch.Tensor,
+        idx: dict,
+        k_tox: float = 0.5,
+        debug: bool = False,
+    ):
         super().__init__()
         self.factors = factors
         self.idx = idx
         self.k_tox = k_tox  # hr⁻¹; NAPQI covalent binding when GSH is depleted
+        self.debug = debug
 
     def forward(self, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         idx = self.idx
@@ -333,6 +376,30 @@ class MichaelisMentenODE(nn.Module):
             c_inh_uM = a_inh / idx["inhib_mw"] / V * UM_PER_MG_PER_L
             rho_inh = c_inh_uM / idx["inhib_ki"]
             denom_enz = denom_enz.index_add(0, idx["inhib_enz_local"], rho_inh)
+
+        # Debug only: print shared CYP1A2 MM denominator components near t ≈ 1 h.
+        if self.debug and abs(float(t) - 1.0) < 0.05:
+            cyp1a2_group = idx["cyp1a2_group"]
+            if cyp1a2_group >= 0:
+                a_apap_liver = y[STATE_IDX["A_liver_apap"]].clamp(min=0.0)
+                a_caff_liver = y[STATE_IDX["A_liver_caffeine"]].clamp(min=0.0)
+                C_apap_liver_uM = a_apap_liver / SPECIES_MW["acetaminophen"] / V * UM_PER_MG_PER_L
+                C_caff_liver_uM = a_caff_liver / SPECIES_MW["caffeine"] / V * UM_PER_MG_PER_L
+                km_apap = idx["km_apap_cyp1a2"]
+                km_caff = idx["km_caff_demeth"]
+                Ki_apap_cyp1a2 = idx["ki_apap_cyp1a2"]
+                D_cyp1a2 = float(denom_enz[cyp1a2_group])
+                print("t =", float(t))
+                print("C_liver_APAP_uM =", float(C_apap_liver_uM))
+                print("C_liver_caff_uM =", float(C_caff_liver_uM))
+                print("APAP substrate term C/Km =", float(C_apap_liver_uM / km_apap))
+                print("APAP inhibitor term C/Ki =", float(C_apap_liver_uM / Ki_apap_cyp1a2))
+                print("caffeine N3 term C/Km =", float(C_caff_liver_uM / km_caff))
+                print("caffeine N1 term C/Km =", float(C_caff_liver_uM / km_caff))
+                print("caffeine N7 term C/Km =", float(C_caff_liver_uM / km_caff))
+                print("caffeine inhibitor term C/Ki =", float(C_caff_liver_uM / idx["ki_caff_cyp1a2"]))
+                print("D_CYP1A2 =", D_cyp1a2)
+
         denom_edge = denom_enz[idx["edge_enz_local"]]
         v_uM_hr = vmax * rho / denom_edge
 
@@ -451,8 +518,8 @@ class GNNODEModel(nn.Module):
         y0[STATE_IDX["A_gsh"]] = data["endogenous_molecule"].x_state[0, 0].abs()
         return y0
 
-    def build_ode(self, factors: torch.Tensor) -> MichaelisMentenODE:
-        return MichaelisMentenODE(factors, self.ode_idx)
+    def build_ode(self, factors: torch.Tensor, debug: bool = False) -> MichaelisMentenODE:
+        return MichaelisMentenODE(factors, self.ode_idx, debug=debug)
 
     def forward(self, data: HeteroData, t: torch.Tensor):
         factors = self.predict_params(data)
