@@ -21,6 +21,7 @@ def run_simulation(
     use_gnn_factors: bool = False,
     checkpoint: Path | str = DEFAULT_CHECKPOINT,
     dose_overrides: dict[str, float] | None = None,
+    debug_cyp1a2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, HeteroData]:
     """Integrate PK ODE; return ``(t, traj, data)``. traj ``[T, S]`` mg, t in hr.
 
@@ -48,7 +49,7 @@ def run_simulation(
             factors = torch.ones(data["reaction"].num_nodes, 1)
         y0 = model.initial_state(data)
         traj = odeint(
-            model.build_ode(factors),
+            model.build_ode(factors, debug=debug_cyp1a2),
             y0,
             t,
             method="rk4",

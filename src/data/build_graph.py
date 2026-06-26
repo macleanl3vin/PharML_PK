@@ -87,6 +87,8 @@ edge_types = [
     ('drug', 'competitively_inhibits', 'enzyme'),
 
     ('drug', 'distributes_to', 'compartment'),
+    ('drug', 'cleared_via', 'reaction'),
+
 
     ('drug', 'reactant_in', 'reaction'),
     ('endogenous_molecule', 'reactant_in', 'reaction'),
@@ -285,6 +287,11 @@ EDGE_FEATURES = {
         "k_clear",
     ],
 
+    # Unchanged parent renal clearance (hr⁻¹) from plasma mass → urine sink.
+    ("drug", "cleared_via", "reaction"): [
+        "k_clear",
+    ],
+
     ("reaction", "excretes_to", "compartment"): [
         "excretion_rate",
     ],
@@ -340,15 +347,20 @@ EDGES = {
         ("CYP2E1", "rxn_cyp_oxidation"), ("CYP3A4", "rxn_cyp_oxidation"),
         ("CYP1A2", "rxn_cyp_oxidation"),
         ("UGT1A1", "rxn_glucuronidation"), ("SULT1A1", "rxn_sulfation"),
-        ("GST", "rxn_gsh_conjugation"), ("CYP1A2", "rxn_caff_n3_demethylation"),
-        # Minor caffeine demethylation routes (CYP1A2).
+        ("GST", "rxn_gsh_conjugation"),
+        # Caffeine demethylation: shared CYPs with APAP oxidation (DDI via MM denominator).
+        # CYP1A2 — N3, N1, N7; CYP2E1 — N1; CYP3A4 — N7.
+        ("CYP1A2", "rxn_caff_n3_demethylation"),
         ("CYP1A2", "rxn_caff_n1_demethylation"),
         ("CYP1A2", "rxn_caff_n7_demethylation"),
+        ("CYP2E1", "rxn_caff_n1_demethylation"),
+        ("CYP3A4", "rxn_caff_n7_demethylation"),
     ],
 
-    # Caffeine competitively inhibits CYP1A2 → throttles APAP oxidation (DDI).
+    # Competitive Ki on CYP1A2; CYP2E1/CYP3A4 DDI also via shared substrate denominators.
     ("drug", "competitively_inhibits", "enzyme"): [
         ("caffeine", "CYP1A2"),
+        # ("acetaminophen", "CYP1A2"),
     ],
 
     ("drug", "reactant_in", "reaction"): [
@@ -391,6 +403,10 @@ EDGES = {
         ("paraxanthine", "rxn_clearance"),
         ("theobromine", "rxn_clearance"),
         ("theophylline", "rxn_clearance"),
+    ],
+    ("drug", "cleared_via", "reaction"): [
+        ("acetaminophen", "rxn_clearance"),
+        ("caffeine", "rxn_clearance"),
     ],
     ("reaction", "excretes_to", "compartment"): [("rxn_clearance", "urine_sink")],
 
@@ -441,8 +457,8 @@ NODE_VALUES = {
         "CYP2E1":  {"baseline_abundance_pmol_mg": 49.0,  "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 27.0},
         "CYP1A2":  {"baseline_abundance_pmol_mg": 52.0,  "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 39.0},
         "CYP3A4":  {"baseline_abundance_pmol_mg": 137.0, "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 70.0},
-        "UGT1A1":  {"baseline_abundance_pmol_mg": 70.0,  "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 30.0},
-        "SULT1A1": {"baseline_abundance_pmol_mg": 40.0,  "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 24.0},
+        "UGT1A1":  {"baseline_abundance_pmol_mg": 30.0,  "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 30.0},
+        "SULT1A1": {"baseline_abundance_pmol_mg": 15.0,  "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 24.0},
         "GST":     {"baseline_abundance_pmol_mg": 100.0, "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 48.0},
     },
     "compartment": {
@@ -514,7 +530,7 @@ EDGE_VALUES = {
         },
     },
     ("administration_event", "releases", "drug"): {
-        ("admin_event_0", "acetaminophen"): {"dose_amount_mg": 1000.0},
+        ("admin_event_0", "acetaminophen"): {"dose_amount_mg": 3000.0},
         ("admin_event_0", "caffeine"):      {"dose_amount_mg": 200.0},
     },
     ("endogenous_molecule", "depleted_by", "reaction"): {
@@ -526,19 +542,24 @@ EDGE_VALUES = {
     ("enzyme", "catalyzes", "reaction"): {
         # Kcat (min⁻¹) IVIVE-calibrated so whole-body clearance matches clinical t½
         # under the flow-limited liver (Kp~1); ~10x APAP, ~4x caffeine vs raw in-vitro.
-        ("CYP2E1", "rxn_cyp_oxidation"):          {"Km": 1290.0, "Ki": 1e6, "Kcat": 42.0},
-        ("CYP3A4", "rxn_cyp_oxidation"):          {"Km": 6890.0, "Ki": 1e6, "Kcat": 21.0},
-        ("CYP1A2", "rxn_cyp_oxidation"):          {"Km": 2700.0, "Ki": 1e6, "Kcat": 1.8},
-        ("UGT1A1", "rxn_glucuronidation"):        {"Km": 3500.0, "Ki": 1e6, "Kcat": 50.0},
-        ("SULT1A1", "rxn_sulfation"):             {"Km": 250.0,  "Ki": 1e6, "Kcat": 33.0},
+        ("CYP2E1", "rxn_cyp_oxidation"):          {"Km": 1000.0, "Ki": 1e6, "Kcat": 45.0},
+        ("CYP3A4", "rxn_cyp_oxidation"):          {"Km": 130.0, "Ki": 80, "Kcat": 21.0},
+        ("CYP1A2", "rxn_cyp_oxidation"):          {"Km": 2000.0, "Ki": 1e6, "Kcat": 10.0},
+        ("UGT1A1", "rxn_glucuronidation"):        {"Km": 3500.0, "Ki": 1e6, "Kcat": 20.0},
+        ("SULT1A1", "rxn_sulfation"):             {"Km": 250.0,  "Ki": 1e6, "Kcat": 12.0},
         ("GST", "rxn_gsh_conjugation"):           {"Km": 900.0,  "Ki": 1e6, "Kcat": 6.1},
-        # Caffeine demethylation Kcat split ~ 84:12:4 (paraxanthine:theobromine:theophylline).
-        ("CYP1A2", "rxn_caff_n3_demethylation"): {"Km": 500.0,  "Ki": 1e6, "Kcat": 16.4},
-        ("CYP1A2", "rxn_caff_n1_demethylation"): {"Km": 500.0,  "Ki": 1e6, "Kcat": 2.2},
-        ("CYP1A2", "rxn_caff_n7_demethylation"): {"Km": 500.0,  "Ki": 1e6, "Kcat": 0.82},
+
+        # Caffeine demethylation: route split ~84:12:4 (N3:N1:N7); enzymes share CYPs with APAP.
+        ("CYP1A2", "rxn_caff_n3_demethylation"): {"Km": 200.0,  "Ki": 1e6, "Kcat": 8.0},
+        ("CYP1A2", "rxn_caff_n1_demethylation"): {"Km": 200.0,  "Ki": 1e6, "Kcat": 1.14},
+        ("CYP1A2", "rxn_caff_n7_demethylation"): {"Km": 200.0,  "Ki": 1e6, "Kcat": 0.38},
+        ("CYP2E1", "rxn_caff_n1_demethylation"): {"Km": 43000.0,  "Ki": 1e6, "Kcat": 2.50},
+        ("CYP3A4", "rxn_caff_n7_demethylation"): {"Km": 40000.0,  "Ki": 3000, "Kcat": 1.0},
     },
     ("drug", "competitively_inhibits", "enzyme"): {
-        ("caffeine", "CYP1A2"): {"Ki": 150.0},  # μM
+        ("caffeine", "CYP1A2"): {"Ki": 80.0},  # μM
+        # ("caffeine", "CYP3A4"): {"Ki": 150.0},  # μM
+        # ("acetaminophen", "CYP1A2"): {"Ki": 10.0}, 
     },
     # Terminal metabolite renal clearance (hr⁻¹).
     ("metabolite", "cleared_via", "reaction"): {
@@ -547,6 +568,11 @@ EDGE_VALUES = {
         ("paraxanthine", "rxn_clearance"):              {"k_clear": 0.3},
         ("theobromine", "rxn_clearance"):               {"k_clear": 0.2},
         ("theophylline", "rxn_clearance"):              {"k_clear": 0.2},
+    },
+    # Unchanged parent in urine (~3% of dose over 48 h); first-order loss from plasma → A_urine_sink.
+    ("drug", "cleared_via", "reaction"): {
+        ("acetaminophen", "rxn_clearance"): {"k_clear": 0.05372},
+        ("caffeine", "rxn_clearance"):      {"k_clear": 0.03038},
     },
     ("drug", "absorbed_via", "reaction"): {
         ("acetaminophen", "apap_absorption"):    {"absorption_rate_ka": 1.0},
