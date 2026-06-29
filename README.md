@@ -8,12 +8,12 @@ The GNN acts as an **in vitro → in vivo extrapolation (IVIVE)** layer: it read
 
 ## Project goal: DDI over time
 
-| Question | Where it is answered |
-|----------|----------------------|
-| How do APAP and caffeine PK change when given together? | Coupled 18-state ODE (default co-administration) |
-| What is the mechanistic interaction? | Shared **CYP1A2** denominator: substrate competition ($\sum C/K_m$) + `caffeine → competitively_inhibits → CYP1A2` ($K_i = 80\ \mu\text{M}$) |
-| How does interaction evolve over 0–24 h? | Time-resolved trajectories: parent plasma mass, NAPQI, GSH, caffeine metabolites |
-| How much does each drug affect the other vs monotherapy? | Run paired scenarios via `dose_overrides` in `simulate.py` (see [Observing DDI](#observing-ddi)) |
+| Question                                                 | Where it is answered                                                                                                                         |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| How do APAP and caffeine PK change when given together?  | Coupled 18-state ODE (default co-administration)                                                                                             |
+| What is the mechanistic interaction?                     | Shared **CYP1A2** denominator: substrate competition ($\sum C/K_m$) + `caffeine → competitively_inhibits → CYP1A2` ($K_i = 80\ \mu\text{M}$) |
+| How does interaction evolve over 0–24 h?                 | Time-resolved trajectories: parent plasma mass, NAPQI, GSH, caffeine metabolites                                                             |
+| How much does each drug affect the other vs monotherapy? | Run paired scenarios via `dose_overrides` in `simulate.py` (see [Observing DDI](#observing-ddi))                                             |
 
 **Design principle:** each parent drug is a **single graph node**; spatial pools (gut, plasma, liver, peripheral) and metabolite masses live in the **ODE state vector**, not as duplicate drug nodes. APAP and caffeine masses are **never summed** — they interact only through shared enzyme terms.
 
@@ -21,11 +21,11 @@ The GNN acts as an **in vitro → in vivo extrapolation (IVIVE)** layer: it read
 
 ## High-level overview
 
-| Layer | Role | What varies over time? |
-|-------|------|------------------------|
-| **Heterogeneous graph** (`build_graph.py`) | Static mechanism map: patient, dosing, compartments, enzymes, reactions, metabolites, Morgan fingerprints, Km/Kcat/Ki, ka, distribution rates, DDI edges | Nothing — nodes hold **static** features only |
-| **Edge-aware GNN** (`gnn_ode.py`) | Two-layer `HeteroConv` + `GATv2Conv`; per-reaction readout → `f_GNN` | Nothing — outputs fixed modulation factors per integration |
-| **Michaelis–Menten ODE** (`gnn_ode.py`) | Tracks **mass (mg)** across gut, plasma, liver, peripheral, metabolites, sinks; competitive enzyme denominators couple substrates and inhibitors | **Yes** — 18-state vector integrated over hours |
+| Layer                                      | Role                                                                                                                                                     | What varies over time?                                     |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| **Heterogeneous graph** (`build_graph.py`) | Static mechanism map: patient, dosing, compartments, enzymes, reactions, metabolites, Morgan fingerprints, Km/Kcat/Ki, ka, distribution rates, DDI edges | Nothing — nodes hold **static** features only              |
+| **Edge-aware GNN** (`gnn_ode.py`)          | Two-layer `HeteroConv` + `GATv2Conv`; per-reaction readout → `f_GNN`                                                                                     | Nothing — outputs fixed modulation factors per integration |
+| **Michaelis–Menten ODE** (`gnn_ode.py`)    | Tracks **mass (mg)** across gut, plasma, liver, peripheral, metabolites, sinks; competitive enzyme denominators couple substrates and inhibitors         | **Yes** — 18-state vector integrated over hours            |
 
 ### Graph vs ODE (why they look different)
 
@@ -119,23 +119,23 @@ Caffeine throttles **CYP1A2** routes (including a fraction of APAP oxidation). *
 
 ### Hepatic CYP layout
 
-| Enzyme | APAP oxidation (NAPQI) | Caffeine routes |
-|--------|------------------------|-----------------|
-| **CYP2E1** | Primary | N1 demethylation (backup, high Km) |
-| **CYP1A2** | Minor | **N3, N1, N7 demethylation** (major when active) |
-| **CYP3A4** | Primary | N7 demethylation (backup), **C8-hydroxylation** |
-| **CYP2D6** | Minor | **N3 demethylation** (backup when CYP1A2 off) |
-| **CYP2C9** | Minor | **N7 demethylation** (backup when CYP1A2 off) |
+| Enzyme     | APAP oxidation (NAPQI) | Caffeine routes                                  |
+| ---------- | ---------------------- | ------------------------------------------------ |
+| **CYP2E1** | Primary                | N1 demethylation (backup, high Km)               |
+| **CYP1A2** | Minor                  | **N3, N1, N7 demethylation** (major when active) |
+| **CYP3A4** | Primary                | N7 demethylation (backup), **C8-hydroxylation**  |
+| **CYP2D6** | Minor                  | **N3 demethylation** (backup when CYP1A2 off)    |
+| **CYP2C9** | Minor                  | **N7 demethylation** (backup when CYP1A2 off)    |
 
 Toggle **`is_active`** on the CYP1A2 enzyme node (`build_graph.py` → `NODE_VALUES["enzyme"]`) to simulate knockout. Use `PGx_phenotype_multiplier: 1.0` with `is_active: 0.0` for knockout — do not zero PGx.
 
 ### Caffeine clearance route split (CYP1A2 ON, calibrated)
 
-| Pathway | Product | ~Fraction | Primary enzyme |
-|---------|---------|-----------|----------------|
-| N3 demethylation | paraxanthine | ~70% | CYP1A2 (+ CYP2D6 backup) |
-| N1 + N7 demethylation | theobromine + theophylline | ~20% combined | CYP1A2 |
-| C8-hydroxylation | 1,3,7-trimethyluric acid | ~10% | CYP3A4 |
+| Pathway               | Product                    | ~Fraction     | Primary enzyme           |
+| --------------------- | -------------------------- | ------------- | ------------------------ |
+| N3 demethylation      | paraxanthine               | ~70%          | CYP1A2 (+ CYP2D6 backup) |
+| N1 + N7 demethylation | theobromine + theophylline | ~20% combined | CYP1A2                   |
+| C8-hydroxylation      | 1,3,7-trimethyluric acid   | ~10%          | CYP3A4                   |
 
 With **CYP1A2 off**, surviving clearance comes from **CYP3A4 C8**, **CYP2D6 N3**, **CYP2C9 N7**, and parent renal `k_clear` — yielding caffeine terminal $t_{1/2} \approx 10\text{–}12\ \mathrm{h}$ vs $\approx 4\text{–}5\ \mathrm{h}$ when CYP1A2 is active.
 
@@ -165,15 +165,15 @@ With **CYP1A2 off**, surviving clearance comes from **CYP3A4 C8**, **CYP2D6 N3**
 
 ## ODE state vector (18 states, mg)
 
-| Index | State | Description |
-|-------|-------|-------------|
-| 0–2 | `A_gut/plasma/liver_apap` | APAP mass pools |
-| 3–4 | `A_napqi`, `A_gsh` | Reactive metabolite & glutathione |
-| 5–7 | `A_gut/plasma/liver_caffeine` | Caffeine mass pools |
-| 8–12 | Metabolite states | Paraxanthine, APAP gluc/sulf, theobromine, theophylline |
-| 13–14 | `A_napqi_adduct_sink`, `A_urine_sink` | Irreversible sinks (mass balance) |
-| 15–16 | `A_periph_apap`, `A_periph_caffeine` | Inert deep-$V_d$ peripheral pools |
-| 17 | `A_trimethyluric` | Caffeine C8-hydroxylation product (1,3,7-trimethyluric acid) |
+| Index | State                                 | Description                                                  |
+| ----- | ------------------------------------- | ------------------------------------------------------------ |
+| 0–2   | `A_gut/plasma/liver_apap`             | APAP mass pools                                              |
+| 3–4   | `A_napqi`, `A_gsh`                    | Reactive metabolite & glutathione                            |
+| 5–7   | `A_gut/plasma/liver_caffeine`         | Caffeine mass pools                                          |
+| 8–12  | Metabolite states                     | Paraxanthine, APAP gluc/sulf, theobromine, theophylline      |
+| 13–14 | `A_napqi_adduct_sink`, `A_urine_sink` | Irreversible sinks (mass balance)                            |
+| 15–16 | `A_periph_apap`, `A_periph_caffeine`  | Inert deep-$V_d$ peripheral pools                            |
+| 17    | `A_trimethyluric`                     | Caffeine C8-hydroxylation product (1,3,7-trimethyluric acid) |
 
 **Systemic amount** (for $V_d$ metrics): plasma + liver + peripheral (gut excluded).
 
@@ -345,37 +345,38 @@ PharmMLPK_MVP/
 │   └── test_environment.py
 ├── requirements.txt
 └── README.md
+
 ```
 
 ---
 
 ## Key files
 
-| File | Purpose |
-|------|---------|
+| File                      | Purpose                                                                                                    |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `src/data/build_graph.py` | Graph builder: 8 enzymes, 15 reactions, 8 metabolites, DDI edges, C8-hydroxylation, distribution, kinetics |
-| `src/models/gnn_ode.py` | `GNNODEModel`, `MichaelisMentenODE`, `build_ode_index`, 18-state definitions |
-| `src/train.py` | Synthetic-data training; checkpoint export |
-| `src/simulate.py` | ODE integration with optional `dose_overrides` and trained `f_GNN` |
-| `src/metrics.py` | Post-hoc NCA: terminal $t_{1/2}$, $V_d$, $C_{\max}$, AUC |
-| `src/plot_ddi.py` | Stacked APAP/caffeine DDI comparison (alone vs co-admin) |
-| `src/dose_response.py` | APAP dose–response with caffeine fixed; NAPQI/GSH sinks |
-| `gnn_schema.csv` | Human-readable node/edge/attribute catalog |
+| `src/models/gnn_ode.py`   | `GNNODEModel`, `MichaelisMentenODE`, `build_ode_index`, 18-state definitions                               |
+| `src/train.py`            | Synthetic-data training; checkpoint export                                                                 |
+| `src/simulate.py`         | ODE integration with optional `dose_overrides` and trained `f_GNN`                                         |
+| `src/metrics.py`          | Post-hoc NCA: terminal $t_{1/2}$, $V_d$, $C_{\max}$, AUC                                                   |
+| `src/plot_ddi.py`         | Stacked APAP/caffeine DDI comparison (alone vs co-admin)                                                   |
+| `src/dose_response.py`    | APAP dose–response with caffeine fixed; NAPQI/GSH sinks                                                    |
+| `gnn_schema.csv`          | Human-readable node/edge/attribute catalog                                                                 |
 
 ---
 
 ## Troubleshooting
 
-| Issue | Suggestion |
-|-------|------------|
-| `ModuleNotFoundError: src` | Set `PYTHONPATH` to project root or use `python -m src....` |
-| PyG install fails | Install matching wheels from [pyg.org](https://data.pyg.org/whl/) |
-| `--use-gnn-factors` raises `FileNotFoundError` | Run `python -m src.train` first |
-| Apple Silicon / MPS | PyTorch uses `mps` when available |
-| ODE NaNs during training | Training rolls back to best weights and reduces LR |
-| DDI effect looks small on APAP PK | Most APAP oxidation uses CYP2E1/CYP3A4; CYP1A2 DDI affects a smaller branch — compare NAPQI and caffeine metabolites |
-| Caffeine t½ ~270 h with CYP1A2 off | Ensure backup routes exist (CYP2D6 N3, CYP2C9 N7, CYP3A4 C8) and `is_active=0` (not `PGx=0`) on CYP1A2 |
-| NAPQI peak gram-scale | Oxidation Kcat may be overscaled for reactive metabolite fraction — tune APAP CYP Kcat or add `NAPQI_FORMATION_SCALE` |
+| Issue                                          | Suggestion                                                                                                            |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `ModuleNotFoundError: src`                     | Set `PYTHONPATH` to project root or use `python -m src....`                                                           |
+| PyG install fails                              | Install matching wheels from [pyg.org](https://data.pyg.org/whl/)                                                     |
+| `--use-gnn-factors` raises `FileNotFoundError` | Run `python -m src.train` first                                                                                       |
+| Apple Silicon / MPS                            | PyTorch uses `mps` when available                                                                                     |
+| ODE NaNs during training                       | Training rolls back to best weights and reduces LR                                                                    |
+| DDI effect looks small on APAP PK              | Most APAP oxidation uses CYP2E1/CYP3A4; CYP1A2 DDI affects a smaller branch — compare NAPQI and caffeine metabolites  |
+| Caffeine t½ ~270 h with CYP1A2 off             | Ensure backup routes exist (CYP2D6 N3, CYP2C9 N7, CYP3A4 C8) and `is_active=0` (not `PGx=0`) on CYP1A2                |
+| NAPQI peak gram-scale                          | Oxidation Kcat may be overscaled for reactive metabolite fraction — tune APAP CYP Kcat or add `NAPQI_FORMATION_SCALE` |
 
 ---
 
