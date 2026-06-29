@@ -28,6 +28,8 @@ SMILES = {
     "paraxanthine": "Cn1cnc2c1c(=O)[nH]c(=O)n2C",
     "theobromine": "Cn1cnc2c1c(=O)n(C)c(=O)[nH]2",
     "theophylline": "Cn1c(=O)c2[nH]cnc2n(C)c1=O",
+    # caffeine C8-hydroxylation metabolite (1,3,7-trimethyluric acid)
+    "trimethyluric_acid": "CN1C2=C(C(=O)N(C1=O)C)N(C(=O)N2)C",
 }
 
 
@@ -117,6 +119,8 @@ ENZYME_NODES = [
     "CYP2E1",
     "CYP1A2",
     "CYP3A4",
+    "CYP2D6",
+    "CYP2C9",
     "UGT1A1",
     "SULT1A1",
     "GST",
@@ -136,6 +140,7 @@ REACTION_NODES = [
     "rxn_caff_n3_demethylation",
     "rxn_caff_n1_demethylation",
     "rxn_caff_n7_demethylation",
+    "rxn_caff_c8_hydroxylation",
     "rxn_clearance",
 ]
 
@@ -154,6 +159,7 @@ REACTION_TYPE = {
     "rxn_caff_n3_demethylation": "demethylation",
     "rxn_caff_n1_demethylation": "demethylation",
     "rxn_caff_n7_demethylation": "demethylation",
+    "rxn_caff_c8_hydroxylation": "hydroxylation",
     "rxn_clearance": "clearance",
 }
 REACTION_TYPE_VOCAB = sorted(set(REACTION_TYPE.values()))
@@ -175,6 +181,7 @@ METABOLITE_NODES = [
     "paraxanthine",
     "theobromine",
     "theophylline",
+    "trimethyluric_acid",
 ]
 
 ENDOGENOUS_MOLECULE_NODES = [
@@ -346,15 +353,20 @@ EDGES = {
     ("enzyme", "catalyzes", "reaction"): [
         ("CYP2E1", "rxn_cyp_oxidation"), ("CYP3A4", "rxn_cyp_oxidation"),
         ("CYP1A2", "rxn_cyp_oxidation"),
+        ("CYP2D6", "rxn_cyp_oxidation"), ("CYP2C9", "rxn_cyp_oxidation"),
         ("UGT1A1", "rxn_glucuronidation"), ("SULT1A1", "rxn_sulfation"),
         ("GST", "rxn_gsh_conjugation"),
         # Caffeine demethylation: shared CYPs with APAP oxidation (DDI via MM denominator).
-        # CYP1A2 — N3, N1, N7; CYP2E1 — N1; CYP3A4 — N7.
+        # CYP1A2 — N3, N1, N7; CYP2E1 — N1; CYP3A4 — N7; CYP2D6 — N3; CYP2C9 — N7.
         ("CYP1A2", "rxn_caff_n3_demethylation"),
+        ("CYP2D6", "rxn_caff_n3_demethylation"),
         ("CYP1A2", "rxn_caff_n1_demethylation"),
         ("CYP1A2", "rxn_caff_n7_demethylation"),
+        ("CYP2C9", "rxn_caff_n7_demethylation"),
         ("CYP2E1", "rxn_caff_n1_demethylation"),
         ("CYP3A4", "rxn_caff_n7_demethylation"),
+        # C8-hydroxylation → 1,3,7-trimethyluric acid; CYP3A4-mediated (non-CYP1A2 route).
+        ("CYP3A4", "rxn_caff_c8_hydroxylation"),
     ],
 
     # Competitive Ki on CYP1A2; CYP2E1/CYP3A4 DDI also via shared substrate denominators.
@@ -370,6 +382,7 @@ EDGES = {
         ("caffeine", "rxn_caff_n3_demethylation"),
         ("caffeine", "rxn_caff_n1_demethylation"),
         ("caffeine", "rxn_caff_n7_demethylation"),
+        ("caffeine", "rxn_caff_c8_hydroxylation"),
     ],
     ("metabolite", "reactant_in", "reaction"): [
         ("NAPQI", "rxn_gsh_conjugation"), ("NAPQI", "rxn_covalent_binding"),
@@ -394,6 +407,7 @@ EDGES = {
         ("rxn_caff_n3_demethylation", "paraxanthine"),
         ("rxn_caff_n1_demethylation", "theobromine"),
         ("rxn_caff_n7_demethylation", "theophylline"),
+        ("rxn_caff_c8_hydroxylation", "trimethyluric_acid"),
         ("rxn_gsh_conjugation", "NAPQI_glutathione"),
     ],
     # Terminal metabolites only; reactive NAPQI is consumed, not renally cleared.
@@ -403,6 +417,7 @@ EDGES = {
         ("paraxanthine", "rxn_clearance"),
         ("theobromine", "rxn_clearance"),
         ("theophylline", "rxn_clearance"),
+        ("trimethyluric_acid", "rxn_clearance"),
     ],
     ("drug", "cleared_via", "reaction"): [
         ("acetaminophen", "rxn_clearance"),
@@ -457,6 +472,8 @@ NODE_VALUES = {
         "CYP2E1":  {"baseline_abundance_pmol_mg": 49.0,  "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 27.0},
         "CYP1A2":  {"baseline_abundance_pmol_mg": 52.0,  "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 39.0},
         "CYP3A4":  {"baseline_abundance_pmol_mg": 137.0, "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 70.0},
+        "CYP2D6":  {"baseline_abundance_pmol_mg": 35.0,  "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 36.0},
+        "CYP2C9":  {"baseline_abundance_pmol_mg": 45.0,  "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 48.0},
         "UGT1A1":  {"baseline_abundance_pmol_mg": 30.0,  "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 30.0},
         "SULT1A1": {"baseline_abundance_pmol_mg": 15.0,  "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 24.0},
         "GST":     {"baseline_abundance_pmol_mg": 100.0, "PGx_phenotype_multiplier": 1.0, "is_active": 1.0, "protein_half_life_hrs": 48.0},
@@ -542,19 +559,27 @@ EDGE_VALUES = {
     ("enzyme", "catalyzes", "reaction"): {
         # Kcat (min⁻¹) IVIVE-calibrated so whole-body clearance matches clinical t½
         # under the flow-limited liver (Kp~1); ~10x APAP, ~4x caffeine vs raw in-vitro.
-        ("CYP2E1", "rxn_cyp_oxidation"):          {"Km": 1000.0, "Ki": 1e6, "Kcat": 45.0},
-        ("CYP3A4", "rxn_cyp_oxidation"):          {"Km": 130.0, "Ki": 80, "Kcat": 21.0},
+        ("CYP2E1", "rxn_cyp_oxidation"):          {"Km": 1000.0, "Ki": 1e6, "Kcat": 9.0},
+        ("CYP3A4", "rxn_cyp_oxidation"):          {"Km": 130.0, "Ki": 80, "Kcat": 5.0},
         ("CYP1A2", "rxn_cyp_oxidation"):          {"Km": 2000.0, "Ki": 1e6, "Kcat": 10.0},
+        ("CYP2D6", "rxn_cyp_oxidation"):          {"Km": 5000.0, "Ki": 1e6, "Kcat": 2.0},
+        ("CYP2C9", "rxn_cyp_oxidation"):          {"Km": 8000.0, "Ki": 1e6, "Kcat": 1.5},
         ("UGT1A1", "rxn_glucuronidation"):        {"Km": 3500.0, "Ki": 1e6, "Kcat": 20.0},
         ("SULT1A1", "rxn_sulfation"):             {"Km": 250.0,  "Ki": 1e6, "Kcat": 12.0},
         ("GST", "rxn_gsh_conjugation"):           {"Km": 900.0,  "Ki": 1e6, "Kcat": 6.1},
 
         # Caffeine demethylation: route split ~84:12:4 (N3:N1:N7); enzymes share CYPs with APAP.
+        # N1/N7 Kcat scaled 1.47x (3:1 ratio kept) so N1+N7 = 20% of caffeine CL at 1A2-ON.
         ("CYP1A2", "rxn_caff_n3_demethylation"): {"Km": 200.0,  "Ki": 1e6, "Kcat": 8.0},
-        ("CYP1A2", "rxn_caff_n1_demethylation"): {"Km": 200.0,  "Ki": 1e6, "Kcat": 1.14},
-        ("CYP1A2", "rxn_caff_n7_demethylation"): {"Km": 200.0,  "Ki": 1e6, "Kcat": 0.38},
-        ("CYP2E1", "rxn_caff_n1_demethylation"): {"Km": 43000.0,  "Ki": 1e6, "Kcat": 2.50},
+        ("CYP2D6", "rxn_caff_n3_demethylation"): {"Km": 400.0,  "Ki": 1e6, "Kcat": 1.0},
+        ("CYP1A2", "rxn_caff_n1_demethylation"): {"Km": 200.0,  "Ki": 1e6, "Kcat": 1.6757},
+        ("CYP1A2", "rxn_caff_n7_demethylation"): {"Km": 200.0,  "Ki": 1e6, "Kcat": 0.5586},
+        ("CYP2C9", "rxn_caff_n7_demethylation"): {"Km": 1500.0, "Ki": 1e6, "Kcat": 0.8},
+        ("CYP2E1", "rxn_caff_n1_demethylation"): {"Km": 40000.0,  "Ki": 1e6, "Kcat": 2.50},
         ("CYP3A4", "rxn_caff_n7_demethylation"): {"Km": 40000.0,  "Ki": 3000, "Kcat": 1.0},
+        # C8-hydroxylation (CYP3A4): ~10-15% of caffeine CL at CYP1A2-ON; Km near the
+        # other caffeine routes so the Vmax fraction ≈ flux fraction.
+        ("CYP3A4", "rxn_caff_c8_hydroxylation"): {"Km": 300.0,  "Ki": 1e6, "Kcat": 1.5},
     },
     ("drug", "competitively_inhibits", "enzyme"): {
         ("caffeine", "CYP1A2"): {"Ki": 80.0},  # μM
@@ -568,6 +593,7 @@ EDGE_VALUES = {
         ("paraxanthine", "rxn_clearance"):              {"k_clear": 0.3},
         ("theobromine", "rxn_clearance"):               {"k_clear": 0.2},
         ("theophylline", "rxn_clearance"):              {"k_clear": 0.2},
+        ("trimethyluric_acid", "rxn_clearance"):        {"k_clear": 0.3},
     },
     # Unchanged parent in urine (~3% of dose over 48 h); first-order loss from plasma → A_urine_sink.
     ("drug", "cleared_via", "reaction"): {
@@ -582,6 +608,8 @@ EDGE_VALUES = {
         ("patient_0", "CYP2E1"):  {"activity_multiplier": 1.0},
         ("patient_0", "CYP1A2"):  {"activity_multiplier": 1.0},
         ("patient_0", "CYP3A4"):  {"activity_multiplier": 1.0},
+        ("patient_0", "CYP2D6"):  {"activity_multiplier": 1.0},
+        ("patient_0", "CYP2C9"):  {"activity_multiplier": 1.0},
         ("patient_0", "UGT1A1"):  {"activity_multiplier": 1.0},
         ("patient_0", "SULT1A1"): {"activity_multiplier": 1.0},
         ("patient_0", "GST"):     {"activity_multiplier": 1.0},

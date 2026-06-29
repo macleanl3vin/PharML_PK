@@ -26,6 +26,7 @@ STATE_NAMES = [
     "A_liver_apap_gluc", "A_liver_apap_sulf", "A_liver_theobromine", "A_liver_theophylline",
     "A_napqi_adduct_sink", "A_urine_sink",
     "A_periph_apap", "A_periph_caffeine",
+    "A_trimethyluric",
 ]
 STATE_IDX = {name: i for i, name in enumerate(STATE_NAMES)}
 
@@ -55,6 +56,7 @@ PRODUCT_STATE = {
     "acetaminophen_sulfate": STATE_IDX["A_liver_apap_sulf"],
     "theobromine": STATE_IDX["A_liver_theobromine"],
     "theophylline": STATE_IDX["A_liver_theophylline"],
+    "trimethyluric_acid": STATE_IDX["A_trimethyluric"],
     "NAPQI_glutathione": STATE_IDX["A_urine_sink"],
 }
 # Co-substrates consumed 1:1 with flux (e.g. GSH in conjugation).
@@ -71,6 +73,7 @@ SPECIES_MW = {
     "acetaminophen_sulfate": 231.22,
     "theobromine": 180.16,
     "theophylline": 180.16,
+    "trimethyluric_acid": 210.19,
 }
 
 # Graph stores Kcat in min⁻¹; ODE time is hours.
@@ -307,10 +310,11 @@ def build_ode_index(data: HeteroData) -> dict:
 
 
 def trajectory_to_curves(traj: torch.Tensor, v_plasma: torch.Tensor) -> torch.Tensor:
-    """Map ODE trajectory to ``[7, T, 2]`` metabolite/parent concentrations (ng/mL).
+    """Map ODE trajectory to ``[8, T, 2]`` metabolite/parent concentrations (ng/mL).
 
-    Column 0 = metabolite; column 1 = parent plasma. NAPQI_glutathione uses
-    GSH consumed as a proxy (no dedicated state).
+    Row order tracks ``METABOLITE_NODES``. Column 0 = metabolite; column 1 = the
+    parent plasma curve. NAPQI_glutathione uses GSH consumed as a proxy (no
+    dedicated state).
     """
     c = traj / v_plasma * NG_PER_MG_PER_L  # [T, S] ng/mL
     i_gsh = STATE_IDX["A_gsh"]
@@ -323,14 +327,15 @@ def trajectory_to_curves(traj: torch.Tensor, v_plasma: torch.Tensor) -> torch.Te
         c[:, STATE_IDX["A_paraxanthine"]],        # paraxanthine
         c[:, STATE_IDX["A_liver_theobromine"]],   # theobromine
         c[:, STATE_IDX["A_liver_theophylline"]],  # theophylline
+        c[:, STATE_IDX["A_trimethyluric"]],       # 1,3,7-trimethyluric acid (C8)
     ], dim=0)
     i_apap_p = STATE_IDX["A_plasma_apap"]
     i_caff_p = STATE_IDX["A_plasma_caffeine"]
     parent = torch.stack([
         c[:, i_apap_p], c[:, i_apap_p], c[:, i_apap_p], c[:, i_apap_p],
-        c[:, i_caff_p], c[:, i_caff_p], c[:, i_caff_p],
+        c[:, i_caff_p], c[:, i_caff_p], c[:, i_caff_p], c[:, i_caff_p],
     ], dim=0)
-    return torch.stack([metab, parent], dim=-1).clamp(min=0.0)  # [7, T, 2]
+    return torch.stack([metab, parent], dim=-1).clamp(min=0.0)  # [8, T, 2]
 
 
 class MichaelisMentenODE(nn.Module):
@@ -345,7 +350,7 @@ class MichaelisMentenODE(nn.Module):
         self,
         factors: torch.Tensor,
         idx: dict,
-        k_tox: float = 0.5,
+        k_tox: float = 0.01,
         debug: bool = False,
     ):
         super().__init__()
@@ -527,7 +532,7 @@ class GNNODEModel(nn.Module):
 
         # Fixed-step rk4: bounds memory vs adaptive solver during backprop through odeint.
         traj = odeint(self.build_ode(factors), y0, t, method="rk4",
-                      options={"step_size": 0.025})
+                      options={"step_size": 0.0025})
 
         v_plasma = data["compartment"].x_static[0, 0].abs().clamp(min=1.0)
         curves = trajectory_to_curves(traj, v_plasma)
