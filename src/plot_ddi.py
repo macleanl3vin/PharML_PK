@@ -18,11 +18,17 @@ import matplotlib.pyplot as plt
 import torch
 
 from src.metrics import pk_metrics_for_drug
+from src.models.gnn_ode import STATE_IDX
 from src.simulate import patient_weight_kg, plasma_volume_L, run_simulation
 
 
-def _curve_ng_mL(curve: torch.Tensor) -> "list[float]":
-    """Detach a C_p tensor to a NumPy array for plotting."""
+def napqi_amount_mg(traj: torch.Tensor) -> torch.Tensor:
+    """Liver NAPQI pool (mg) from ODE trajectory ``[T, S]``."""
+    return traj[:, STATE_IDX["A_napqi"]].clamp(min=0.0)
+
+
+def _to_numpy(curve: torch.Tensor) -> "list[float]":
+    """Detach a 1-D tensor to a NumPy array for plotting."""
     return curve.detach().numpy()
 
 
@@ -32,20 +38,22 @@ def plot_ddi_comparison(
     apap_co: torch.Tensor,
     caff_alone: torch.Tensor,
     caff_co: torch.Tensor,
+    napqi_alone: torch.Tensor,
+    napqi_co: torch.Tensor,
     output: Path,
     show: bool = False,
 ) -> None:
-    """Stacked APAP / caffeine plasma C_p (ng/mL), each panel with its own y-scale."""
+    """Stacked APAP / caffeine plasma C_p (ng/mL) and NAPQI (mg) over time."""
     hours = t.detach().numpy()
 
-    fig, (ax_apap, ax_caff) = plt.subplots(2, 1, figsize=(9, 8), sharex=True)
+    fig, (ax_apap, ax_caff, ax_napqi) = plt.subplots(3, 1, figsize=(9, 10), sharex=True)
 
     ax_apap.plot(
-        hours, _curve_ng_mL(apap_alone),
+        hours, _to_numpy(apap_alone),
         label="Acetaminophen alone", color="tab:blue", linewidth=2,
     )
     ax_apap.plot(
-        hours, _curve_ng_mL(apap_co),
+        hours, _to_numpy(apap_co),
         label="APAP + caffeine", color="tab:red", linestyle="--", linewidth=2,
     )
     ax_apap.set_title("Acetaminophen PK: Impact of Caffeine Co-administration")
@@ -54,18 +62,31 @@ def plot_ddi_comparison(
     ax_apap.legend(loc="upper right")
 
     ax_caff.plot(
-        hours, _curve_ng_mL(caff_alone),
+        hours, _to_numpy(caff_alone),
         label="Caffeine alone", color="tab:orange", linewidth=2,
     )
     ax_caff.plot(
-        hours, _curve_ng_mL(caff_co),
+        hours, _to_numpy(caff_co),
         label="Caffeine + APAP", color="tab:red", linestyle="--", linewidth=2,
     )
     ax_caff.set_title("Caffeine PK: Impact of Acetaminophen Co-administration")
     ax_caff.set_ylabel("Caffeine Concentration (ng/mL)")
-    ax_caff.set_xlabel("Time (h)")
     ax_caff.grid(True, alpha=0.3)
     ax_caff.legend(loc="upper right")
+
+    ax_napqi.plot(
+        hours, _to_numpy(napqi_alone),
+        label="APAP alone", color="tab:blue", linewidth=2,
+    )
+    ax_napqi.plot(
+        hours, _to_numpy(napqi_co),
+        label="APAP + caffeine", color="tab:red", linestyle="--", linewidth=2,
+    )
+    ax_napqi.set_title("NAPQI: Impact of Caffeine Co-administration")
+    ax_napqi.set_ylabel("NAPQI amount (mg)")
+    ax_napqi.set_xlabel("Time (h)")
+    ax_napqi.grid(True, alpha=0.3)
+    ax_napqi.legend(loc="upper right")
 
     fig.tight_layout()
 
@@ -118,6 +139,9 @@ def main() -> None:
     m_apap_co = pk_metrics_for_drug(traj_coadmin, t, "apap", v_plasma, weight_kg=weight)
     m_caff_co = pk_metrics_for_drug(traj_coadmin, t, "caffeine", v_plasma, weight_kg=weight)
 
+    napqi_alone = napqi_amount_mg(traj_apap_alone)
+    napqi_co = napqi_amount_mg(traj_coadmin)
+
     # Step 3: build and save the stacked comparison figure.
     plot_ddi_comparison(
         t,
@@ -125,8 +149,15 @@ def main() -> None:
         apap_co=m_apap_co["C_p_ng_mL"],
         caff_alone=m_caff_alone["C_p_ng_mL"],
         caff_co=m_caff_co["C_p_ng_mL"],
+        napqi_alone=napqi_alone,
+        napqi_co=napqi_co,
         output=args.output,
         show=args.show,
+    )
+
+    print(
+        f"\nPeak NAPQI: APAP alone = {float(napqi_alone.max()):.4f} mg | "
+        f"APAP + caffeine = {float(napqi_co.max()):.4f} mg"
     )
 
     # Step 4: quantify the DDI half-life shift via terminal NCA t1/2.

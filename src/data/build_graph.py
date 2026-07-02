@@ -491,8 +491,8 @@ NODE_VALUES = {
         "glutathione": {
             "current_amount_glut": 3000.0,
             "baseline_homeostatic_pool_glut": 3000.0,
-            # First-order refill toward baseline (hr⁻¹) after NAPQI conjugation.
-            "synthesis_rate": 0.1,
+            # First-order refill toward baseline (hr⁻¹); reduced for acute overdose sims.
+            "synthesis_rate": 0.015,
             "depletion_rate": 0.0,
         },
     },
@@ -559,27 +559,34 @@ EDGE_VALUES = {
     ("enzyme", "catalyzes", "reaction"): {
         # Kcat (min⁻¹) IVIVE-calibrated so whole-body clearance matches clinical t½
         # under the flow-limited liver (Kp~1); ~10x APAP, ~4x caffeine vs raw in-vitro.
-        ("CYP2E1", "rxn_cyp_oxidation"):          {"Km": 1000.0, "Ki": 1e6, "Kcat": 9.0},
-        ("CYP3A4", "rxn_cyp_oxidation"):          {"Km": 130.0, "Ki": 80, "Kcat": 5.0},
+        # APAP physiology: Phase II conjugation (UGT, SULT) is the PRIMARY parent
+        # clearance route; CYP oxidation is a minor NAPQI-forming shunt (further
+        # down-scaled at low liver C by napqi_formation_scale() in gnn_ode.py). CYP2E1 is the
+        # dominant NAPQI former (low Km, high turnover); CYP3A4/CYP1A2/CYP2D6/CYP2C9
+        # are negligible backups, so any single CYP knockout barely changes parent
+        # t½ — it mainly affects NAPQI peak, GSH depletion, and adduct formation.
+        ("CYP2E1", "rxn_cyp_oxidation"):          {"Km": 300.0,  "Ki": 1e6, "Kcat": 60.0},
+        ("CYP3A4", "rxn_cyp_oxidation"):          {"Km": 4000.0, "Ki": 1e6, "Kcat": 10.0},
         ("CYP1A2", "rxn_cyp_oxidation"):          {"Km": 2000.0, "Ki": 1e6, "Kcat": 10.0},
         ("CYP2D6", "rxn_cyp_oxidation"):          {"Km": 5000.0, "Ki": 1e6, "Kcat": 2.0},
         ("CYP2C9", "rxn_cyp_oxidation"):          {"Km": 8000.0, "Ki": 1e6, "Kcat": 1.5},
-        ("UGT1A1", "rxn_glucuronidation"):        {"Km": 3500.0, "Ki": 1e6, "Kcat": 20.0},
-        ("SULT1A1", "rxn_sulfation"):             {"Km": 250.0,  "Ki": 1e6, "Kcat": 12.0},
+        # Conjugation = primary APAP elimination: glucuronidation (high capacity,
+        # ~55-60% of dose) > sulfation (capacity-limited, ~30%) at 3000 mg.
+        ("UGT1A1", "rxn_glucuronidation"):        {"Km": 1450.0, "Ki": 1e6, "Kcat": 135.0},
+        ("SULT1A1", "rxn_sulfation"):             {"Km": 600.0,  "Ki": 1e6, "Kcat": 60.0},
         ("GST", "rxn_gsh_conjugation"):           {"Km": 900.0,  "Ki": 1e6, "Kcat": 6.1},
 
-        # Caffeine demethylation: route split ~84:12:4 (N3:N1:N7); enzymes share CYPs with APAP.
-        # N1/N7 Kcat scaled 1.47x (3:1 ratio kept) so N1+N7 = 20% of caffeine CL at 1A2-ON.
-        ("CYP1A2", "rxn_caff_n3_demethylation"): {"Km": 200.0,  "Ki": 1e6, "Kcat": 8.0},
-        ("CYP2D6", "rxn_caff_n3_demethylation"): {"Km": 400.0,  "Ki": 1e6, "Kcat": 1.0},
-        ("CYP1A2", "rxn_caff_n1_demethylation"): {"Km": 200.0,  "Ki": 1e6, "Kcat": 1.6757},
-        ("CYP1A2", "rxn_caff_n7_demethylation"): {"Km": 200.0,  "Ki": 1e6, "Kcat": 0.5586},
+        # Caffeine clearance (200 mg, CYP1A2 ON): ~65% N3, ~20% N1+N7 (3:1), ~13% C8, ~3% renal.
+        # N1/N7 Kcat ratio 3:1 on CYP1A2; backup N3 (CYP2D6), N1 (CYP2E1), N7 (CYP2C9/CYP3A4).
+        ("CYP1A2", "rxn_caff_n3_demethylation"): {"Km": 200.0, "Ki": 1e6, "Kcat": 9},
+        ("CYP2D6", "rxn_caff_n3_demethylation"): {"Km": 400.0,  "Ki": 1e6, "Kcat": 0.6},
+        ("CYP1A2", "rxn_caff_n1_demethylation"): {"Km": 200.0,  "Ki": 1e6, "Kcat": 1.10},
+        ("CYP1A2", "rxn_caff_n7_demethylation"): {"Km": 200.0,  "Ki": 1e6, "Kcat": 0.35},
         ("CYP2C9", "rxn_caff_n7_demethylation"): {"Km": 1500.0, "Ki": 1e6, "Kcat": 0.8},
         ("CYP2E1", "rxn_caff_n1_demethylation"): {"Km": 40000.0,  "Ki": 1e6, "Kcat": 2.50},
         ("CYP3A4", "rxn_caff_n7_demethylation"): {"Km": 40000.0,  "Ki": 3000, "Kcat": 1.0},
-        # C8-hydroxylation (CYP3A4): ~10-15% of caffeine CL at CYP1A2-ON; Km near the
-        # other caffeine routes so the Vmax fraction ≈ flux fraction.
-        ("CYP3A4", "rxn_caff_c8_hydroxylation"): {"Km": 300.0,  "Ki": 1e6, "Kcat": 1.5},
+        # C8-hydroxylation (CYP3A4): ~10-15% of caffeine CL at CYP1A2-ON.
+        ("CYP3A4", "rxn_caff_c8_hydroxylation"): {"Km": 295.0,  "Ki": 1e6, "Kcat": 1.10},
     },
     ("drug", "competitively_inhibits", "enzyme"): {
         ("caffeine", "CYP1A2"): {"Ki": 80.0},  # μM
@@ -597,11 +604,11 @@ EDGE_VALUES = {
     },
     # Unchanged parent in urine (~3% of dose over 48 h); first-order loss from plasma → A_urine_sink.
     ("drug", "cleared_via", "reaction"): {
-        ("acetaminophen", "rxn_clearance"): {"k_clear": 0.05372},
-        ("caffeine", "rxn_clearance"):      {"k_clear": 0.03038},
+        ("acetaminophen", "rxn_clearance"): {"k_clear": 0.05},
+        ("caffeine", "rxn_clearance"):      {"k_clear": 0.160},
     },
     ("drug", "absorbed_via", "reaction"): {
-        ("acetaminophen", "apap_absorption"):    {"absorption_rate_ka": 1.0},
+        ("acetaminophen", "apap_absorption"):    {"absorption_rate_ka": 0.45},
         ("caffeine", "caffeine_absorption"):     {"absorption_rate_ka": 1.2},
     },
     ("patient", "expresses", "enzyme"): {
