@@ -119,23 +119,41 @@ Caffeine throttles **CYP1A2** routes (including a fraction of APAP oxidation). *
 
 ### Hepatic CYP layout
 
-| Enzyme     | APAP oxidation (NAPQI) | Caffeine routes                                  |
-| ---------- | ---------------------- | ------------------------------------------------ |
-| **CYP2E1** | Primary                | N1 demethylation (backup, high Km)               |
-| **CYP1A2** | Minor                  | **N3, N1, N7 demethylation** (major when active) |
-| **CYP3A4** | Primary                | N7 demethylation (backup), **C8-hydroxylation**  |
-| **CYP2D6** | Minor                  | **N3 demethylation** (backup when CYP1A2 off)    |
-| **CYP2C9** | Minor                  | **N7 demethylation** (backup when CYP1A2 off)    |
+| Enzyme     | APAP oxidation (NAPQI)         | Caffeine routes                                  |
+| ---------- | ----------------------------- | ------------------------------------------------ |
+| **CYP2E1** | **Primary** (~90% of NAPQI)   | N1 demethylation (backup, high Km)               |
+| **CYP1A2** | Negligible backup             | **N3, N1, N7 demethylation** (major when active) |
+| **CYP3A4** | Negligible backup (high Km)   | N7 demethylation (backup), **C8-hydroxylation**  |
+| **CYP2D6** | Negligible backup             | **N3 demethylation** (backup when CYP1A2 off)    |
+| **CYP2C9** | Negligible backup             | **N7 demethylation** (backup when CYP1A2 off)    |
 
-Toggle **`is_active`** on the CYP1A2 enzyme node (`build_graph.py` → `NODE_VALUES["enzyme"]`) to simulate knockout. Use `PGx_phenotype_multiplier: 1.0` with `is_active: 0.0` for knockout — do not zero PGx.
+APAP oxidation is a **minor NAPQI-forming shunt** (~5–10% of dose, further down-scaled
+by concentration-dependent `napqi_formation_scale()` in `gnn_ode.py`); parent APAP clearance is driven by Phase II
+conjugation (see below). Because **CYP2E1 dominates** the small oxidative branch, any
+single CYP knockout barely shifts parent APAP $t_{1/2}$ (~2–3 h), while a **CYP2E1
+knockout collapses the NAPQI peak, GSH depletion, and adduct formation**.
+
+Toggle **`is_active`** on any enzyme node (`build_graph.py` → `NODE_VALUES["enzyme"]`) to
+simulate knockout. Use `PGx_phenotype_multiplier: 1.0` with `is_active: 0.0` for knockout
+— do not zero PGx.
+
+### APAP parent clearance route split (3000 mg, calibrated)
+
+| Pathway          | Enzyme  | ~Fraction of dose | Notes                                        |
+| ---------------- | ------- | ----------------- | -------------------------------------------- |
+| Glucuronidation  | UGT1A1  | ~55–60%           | High-capacity primary route                  |
+| Sulfation        | SULT1A1 | ~30%              | Capacity-limited (saturates at high dose)    |
+| CYP oxidation    | CYP2E1  | ~5–10% (therapeutic) | NAPQI shunt (`napqi_formation_scale`, rises at overdose) |
+| Unchanged renal  | —       | <5%               | First-order parent `k_clear` (plasma→urine)  |
 
 ### Caffeine clearance route split (CYP1A2 ON, calibrated)
 
 | Pathway               | Product                    | ~Fraction     | Primary enzyme           |
 | --------------------- | -------------------------- | ------------- | ------------------------ |
-| N3 demethylation      | paraxanthine               | ~70%          | CYP1A2 (+ CYP2D6 backup) |
+| N3 demethylation      | paraxanthine               | ~65%          | CYP1A2 (+ CYP2D6 backup) |
 | N1 + N7 demethylation | theobromine + theophylline | ~20% combined | CYP1A2                   |
-| C8-hydroxylation      | 1,3,7-trimethyluric acid   | ~10%          | CYP3A4                   |
+| C8-hydroxylation      | 1,3,7-trimethyluric acid   | ~13%          | CYP3A4                   |
+| Unchanged renal       | (parent in urine)          | ~3%           | plasma `k_clear`         |
 
 With **CYP1A2 off**, surviving clearance comes from **CYP3A4 C8**, **CYP2D6 N3**, **CYP2C9 N7**, and parent renal `k_clear` — yielding caffeine terminal $t_{1/2} \approx 10\text{–}12\ \mathrm{h}$ vs $\approx 4\text{–}5\ \mathrm{h}$ when CYP1A2 is active.
 
@@ -374,9 +392,10 @@ PharmMLPK_MVP/
 | `--use-gnn-factors` raises `FileNotFoundError` | Run `python -m src.train` first                                                                                       |
 | Apple Silicon / MPS                            | PyTorch uses `mps` when available                                                                                     |
 | ODE NaNs during training                       | Training rolls back to best weights and reduces LR                                                                    |
-| DDI effect looks small on APAP PK              | Most APAP oxidation uses CYP2E1/CYP3A4; CYP1A2 DDI affects a smaller branch — compare NAPQI and caffeine metabolites  |
+| DDI effect looks small on APAP PK              | APAP oxidation is a minor CYP2E1 shunt; parent clearance is conjugation-driven, so CYP-level DDIs mainly move NAPQI/GSH — compare those, not APAP $t_{1/2}$ |
 | Caffeine t½ ~270 h with CYP1A2 off             | Ensure backup routes exist (CYP2D6 N3, CYP2C9 N7, CYP3A4 C8) and `is_active=0` (not `PGx=0`) on CYP1A2                |
-| NAPQI peak gram-scale                          | Oxidation Kcat may be overscaled for reactive metabolite fraction — tune APAP CYP Kcat or add `NAPQI_FORMATION_SCALE` |
+| NAPQI peak gram-scale at therapeutic dose | Expected after refactor; scale is 0.05 at low liver C. At overdose, `napqi_formation_scale` ramps toward 0.55 |
+| Weak toxicity at high APAP dose           | Run `python -m src.dose_response`; tune `NAPQI_FORMATION_SCALE_MAX`, `COSUB_GATE_MG`, `DEFAULT_K_TOX_HR`, SULT Km/Kcat |
 
 ---
 

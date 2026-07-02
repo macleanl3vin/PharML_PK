@@ -88,7 +88,28 @@ LIVER_WEIGHT_G = 1500.0
 PMOL_TO_UMOL = 1e-6
 
 # Co-substrate availability gate; stalls conjugation as GSH depletes (mg half-max).
-COSUB_GATE_MG = 50.0
+COSUB_GATE_MG = 200.0
+
+# APAP CYP oxidation → NAPQI is a minor shunt at therapeutic C, rising when Phase II
+# saturates. Scales ONLY rxn_cyp_oxidation flux (substrate loss = NAPQI formation).
+NAPQI_FORMATION_SCALE_MIN = 0.05   # ~5–10% ox route at 3000 mg
+NAPQI_FORMATION_SCALE_MAX = 0.50   # unscaled CYP shunt at overdose liver C
+NAPQI_SCALE_C_REF_UM = 850.0       # liver APAP μM at half-max scale ramp
+NAPQI_SCALE_HILL_N = 1.75
+DEFAULT_K_TOX_HR = 0.08            # NAPQI → covalent adduct when GSH depleted
+
+
+def napqi_formation_scale(c_apap_liver_uM: torch.Tensor) -> torch.Tensor:
+    """Concentration-dependent NAPQI shunt scale from liver APAP μM.
+
+    Hill ramp on C/C_ref: MIN at low C (therapeutic), MAX when conjugation saturates.
+    """
+    rho = (c_apap_liver_uM / NAPQI_SCALE_C_REF_UM).clamp(min=0.0)
+    u = rho.pow(NAPQI_SCALE_HILL_N) / (1.0 + rho.pow(NAPQI_SCALE_HILL_N))
+    return (
+        NAPQI_FORMATION_SCALE_MIN
+        + (NAPQI_FORMATION_SCALE_MAX - NAPQI_FORMATION_SCALE_MIN) * u
+    )
 
 NG_PER_MG_PER_L = 1000.0   # mg/L → ng/mL
 UM_PER_MG_PER_L = 1000.0   # C[μM] = A[mg] / MW / V[L] × 1000
@@ -166,6 +187,18 @@ def build_ode_index(data: HeteroData) -> dict:
             edge_mw_cosub.append(SPECIES_MW[c])
         else:
             edge_cosub_state.append(0); edge_cosub_mask.append(False); edge_mw_cosub.append(1.0)
+
+    # CYP oxidation edges receive dynamic napqi_formation_scale() in the ODE forward pass.
+    edge_is_cyp_oxidation = [rxn_names[r] == "rxn_cyp_oxidation" for r in edge_rxn]
+    edge_flux_scale = [1.0] * len(edge_rxn)
+
+    km_sult_apap = 600.0
+    enz_name_list = NODE_NAMES["enzyme"]
+    for k, (e, r) in enumerate(data[cat_et].edge_index.t().tolist()):
+        if rxn_names[r] != "rxn_sulfation" or enz_name_list[e] != "SULT1A1":
+            continue
+        km_sult_apap = max(float(cat_attr[k, 0]), 1e-6)
+        break
 
     # Reactions on the same enzyme share one MM denominator (DDI).
     uniq_enz = sorted(set(edge_enz_global))
@@ -270,6 +303,9 @@ def build_ode_index(data: HeteroData) -> dict:
         "edge_enz_local": L(edge_enz_local),
         "edge_km": torch.tensor(edge_km, dtype=torch.float),
         "edge_vmax_base": torch.tensor(edge_vmax_base, dtype=torch.float),
+        "edge_flux_scale": torch.tensor(edge_flux_scale, dtype=torch.float),
+        "edge_is_cyp_oxidation": torch.tensor(edge_is_cyp_oxidation, dtype=torch.bool),
+        "km_sult_apap": km_sult_apap,
         "edge_sub_state": L(edge_sub_state),
         "edge_mw_sub": torch.tensor(edge_mw_sub, dtype=torch.float),
         "edge_prod_state_valid": L([s for s, m in zip(edge_prod_state, edge_prod_mask) if m]),
@@ -350,7 +386,7 @@ class MichaelisMentenODE(nn.Module):
         self,
         factors: torch.Tensor,
         idx: dict,
-        k_tox: float = 0.01,
+        k_tox: float = DEFAULT_K_TOX_HR,
         debug: bool = False,
     ):
         super().__init__()
@@ -407,6 +443,14 @@ class MichaelisMentenODE(nn.Module):
 
         denom_edge = denom_enz[idx["edge_enz_local"]]
         v_uM_hr = vmax * rho / denom_edge
+
+        # Concentration-dependent NAPQI shunt on APAP CYP oxidation edges only.
+        a_apap_liver = y[STATE_IDX["A_liver_apap"]].clamp(min=0.0)
+        c_apap_liver_uM = a_apap_liver / SPECIES_MW["acetaminophen"] / V * UM_PER_MG_PER_L
+        napqi_scale = napqi_formation_scale(c_apap_liver_uM)
+        ox_mask = idx["edge_is_cyp_oxidation"].to(dtype=v_uM_hr.dtype, device=v_uM_hr.device)
+        v_uM_hr = v_uM_hr * (1.0 - ox_mask + ox_mask * napqi_scale)
+        v_uM_hr = v_uM_hr * idx["edge_flux_scale"]
 
         # Scale flux by co-substrate availability (e.g. GSH gate).
         if idx["edge_cosub_local_valid"].numel() > 0:
